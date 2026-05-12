@@ -56,6 +56,17 @@ class ChatRequest(BaseModel):
     metadata: Optional[dict[str, Any]] = None
 
 
+class NormalisedLLMRequest(BaseModel):
+    provider: str
+    model: str
+    messages: list[MessageParam]
+    tools: Optional[list[Tool]] = None
+    tool_choice: Optional[Any] = None
+    params: Optional[ChatParams] = None
+    stream: bool = False
+    metadata: Optional[dict[str, Any]] = None
+
+
 class ChoiceMessage(BaseModel):
     role: str
     content: Optional[str] = None

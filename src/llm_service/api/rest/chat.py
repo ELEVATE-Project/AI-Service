@@ -3,16 +3,18 @@ import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from src.llm_service.api.deps import get_tenant
+from src.llm_service.api.deps import get_secret_backend, get_tenant
+from src.llm_service.normaliser import normalise
 from src.llm_service.schemas.chat import (
     CacheBlock, ChatRequest, ChatResponse, Choice, ChoiceMessage,
     ErrorData, FinishData, TokenData, UsageBlock,
 )
 from src.shared.db.models import Tenant
 from src.shared.schemas.envelope import CostBlock, GuardrailsBlock, LatencyBlock, PolicyBlock
+from src.shared.secrets.backend import MissingTenantKeyError, SecretBackend
 
 router = APIRouter(prefix="/v1")
 
@@ -81,11 +83,17 @@ async def _stub_stream(body: ChatRequest, request_id: str) -> AsyncIterator[str]
 
 
 @router.post("/chat", response_model=ChatResponse)
-async def chat(body: ChatRequest, request: Request, tenant: Tenant = Depends(get_tenant),) -> ChatResponse:
+async def chat(
+    body: ChatRequest, request: Request, tenant: Tenant = Depends(get_tenant),
+    secret_backend: SecretBackend = Depends(get_secret_backend),
+) -> ChatResponse:
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
-    # TODO: Step 3 — load tenant BYOK key
-    # TODO: Step 4 — normalise request
+    normalised = normalise(body)
+    try:
+        tenant_key = await secret_backend.get_key(tenant.id, body.provider)
+    except MissingTenantKeyError:
+        raise HTTPException(status_code=422, detail="missing_tenant_key")
     # TODO: Step 5 — policy check
     # TODO: Step 6 — guardrails input
     # TODO: Step 7 — cache lookup
@@ -97,9 +105,22 @@ async def chat(body: ChatRequest, request: Request, tenant: Tenant = Depends(get
 
 
 @router.post("/chat/stream")
-async def chat_stream(body: ChatRequest, request: Request, tenant: Tenant = Depends(get_tenant),) -> StreamingResponse:
+async def chat_stream(
+    body: ChatRequest, request: Request, tenant: Tenant = Depends(get_tenant),
+    secret_backend: SecretBackend = Depends(get_secret_backend),
+) -> StreamingResponse:
     request_id = request.headers.get("x-request-id") or _new_request_id()
-    # TODO: same pipeline as /chat — auth, policy, guardrails, cache, provider, ledger
+    normalised = normalise(body)                                        # Step 4
+    try:
+        tenant_key = await secret_backend.get_key(tenant.id, body.provider)   # Step 3
+    except MissingTenantKeyError:
+        raise HTTPException(status_code=422, detail="missing_tenant_key")
+    # TODO: Step 5 — policy check
+    # TODO: Step 6 — guardrails input
+    # TODO: Step 7 — cache lookup
+    # TODO: Step 8 — route to provider + upstream call
+    # TODO: Step 9 — guardrails output
+    # TODO: Step 10 — ledger write
     return StreamingResponse(
         _stub_stream(body, request_id),
         media_type="text/event-stream",

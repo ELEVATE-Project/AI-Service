@@ -1,0 +1,70 @@
+[project]
+name = "ai-service"
+version = "0.1.0"
+description = "Gritworks multi-provider LLM gateway (REST + WS, MCP-ready) with sibling voice module."
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+    # Web framework
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    # Validation + settings
+    "pydantic>=2.7",
+    "pydantic-settings>=2.4",
+    # Database
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg>=0.29",
+    "alembic>=1.13",
+    # Cache + single-flight (Phase 2 cache; Phase 1 reserves the dep)
+    "redis>=5.0",
+    # Provider SDKs (Phase 1: OpenAI direct, Anthropic direct, Bedrock direct)
+    "openai>=1.40",
+    "anthropic>=0.34",
+    "boto3>=1.35",
+    # HTTP client for HF Inference Endpoints + HF self-hosted TGI/vLLM
+    "httpx>=0.27",
+    # Observability
+    "langfuse>=2.40",
+    "structlog>=24.1",
+    # Pricing YAML + secrets
+    "pyyaml>=6.0",
+    "keyring>=24.0",
+    "cryptography>=42.0",
+    # CLI
+    "click>=8.1",
+    "mkdocs>=1.6.1",
+]
+
+[project.optional-dependencies]
+# Phase 3 — guardrails
+guardrails = [
+    "presidio-analyzer>=2.2",
+    "presidio-anonymizer>=2.2",
+]
+# Phase 4 — Arq-backed batch consolidator
+queue = [
+    "arq>=0.26",
+]
+
+[project.scripts]
+llm-service = "shared.secrets.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "vcrpy>=6.0",
+    "pytest-vcr>=1.0",
+    "ruff>=0.5",
+    "import-linter>=2.0",
+    "mkdocs>=1.6.1",
+    "mkdocs-material>=9.5",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/shared", "src/llm_service", "src/voice"]

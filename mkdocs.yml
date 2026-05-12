@@ -1,0 +1,27 @@
+site_name: LLM Service Documentation
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.instant
+    - navigation.top
+    - search.highlight
+    - content.code.copy
+    - toc.follow
+    - toc.integrate
+
+nav:
+  - Home: index.md
+
+  - Getting Started:
+      - Local Setup: local-setup.md
+
+  - API:
+      - Usage Guide: usage.md
+
+  - Concepts:
+      - Auth & Tenants: auth-and-tenants.md
+      - Keys & Secrets CLI: keys-cli.md
+      - Database Models: models.md

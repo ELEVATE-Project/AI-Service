@@ -6,13 +6,14 @@ from collections.abc import AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from src.llm_service.api.deps import get_secret_backend, get_tenant
+from src.llm_service.api.deps import get_policy_checker, get_secret_backend, get_tenant
 from src.llm_service.normaliser import normalise
 from src.llm_service.schemas.chat import (
     CacheBlock, ChatRequest, ChatResponse, Choice, ChoiceMessage,
     ErrorData, FinishData, TokenData, UsageBlock,
 )
 from src.shared.db.models import Tenant
+from src.shared.policy.checker import PolicyChecker, PolicyContext, PolicyExceededError
 from src.shared.schemas.envelope import CostBlock, GuardrailsBlock, LatencyBlock, PolicyBlock
 from src.shared.secrets.backend import MissingTenantKeyError, SecretBackend
 
@@ -86,6 +87,7 @@ async def _stub_stream(body: ChatRequest, request_id: str) -> AsyncIterator[str]
 async def chat(
     body: ChatRequest, request: Request, tenant: Tenant = Depends(get_tenant),
     secret_backend: SecretBackend = Depends(get_secret_backend),
+    policy_checker: PolicyChecker = Depends(get_policy_checker),
 ) -> ChatResponse:
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
@@ -94,7 +96,13 @@ async def chat(
         tenant_key = await secret_backend.get_key(tenant.id, body.provider)
     except MissingTenantKeyError:
         raise HTTPException(status_code=422, detail="missing_tenant_key")
-    # TODO: Step 5 — policy check
+    try:
+        await policy_checker.check(tenant.id, PolicyContext(
+            provider=normalised.provider, model=normalised.model,
+            max_tokens=normalised.params.max_tokens if normalised.params else None,
+        ))
+    except PolicyExceededError as e:
+        raise HTTPException(status_code=429, detail=e.detail)
     # TODO: Step 6 — guardrails input
     # TODO: Step 7 — cache lookup
     # TODO: Step 8 — route to provider + upstream call
@@ -108,14 +116,21 @@ async def chat(
 async def chat_stream(
     body: ChatRequest, request: Request, tenant: Tenant = Depends(get_tenant),
     secret_backend: SecretBackend = Depends(get_secret_backend),
+    policy_checker: PolicyChecker = Depends(get_policy_checker),
 ) -> StreamingResponse:
     request_id = request.headers.get("x-request-id") or _new_request_id()
-    normalised = normalise(body)                                        # Step 4
+    normalised = normalise(body)
     try:
-        tenant_key = await secret_backend.get_key(tenant.id, body.provider)   # Step 3
+        tenant_key = await secret_backend.get_key(tenant.id, body.provider)
     except MissingTenantKeyError:
         raise HTTPException(status_code=422, detail="missing_tenant_key")
-    # TODO: Step 5 — policy check
+    try:
+        await policy_checker.check(tenant.id, PolicyContext(
+            provider=normalised.provider, model=normalised.model,
+            max_tokens=normalised.params.max_tokens if normalised.params else None,
+        ))
+    except PolicyExceededError as e:
+        raise HTTPException(status_code=429, detail=e.detail)
     # TODO: Step 6 — guardrails input
     # TODO: Step 7 — cache lookup
     # TODO: Step 8 — route to provider + upstream call

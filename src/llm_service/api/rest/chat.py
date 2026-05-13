@@ -1,18 +1,21 @@
 from __future__ import annotations
+
 import asyncio
 import time
 import uuid
 from collections.abc import AsyncIterator
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from src.llm_service.api.deps import get_policy_checker, get_secret_backend, get_tenant
+from src.llm_service.api.deps import get_guardrails, get_policy_checker, get_secret_backend, get_tenant
 from src.llm_service.normaliser import normalise
 from src.llm_service.schemas.chat import (
     CacheBlock, ChatRequest, ChatResponse, Choice, ChoiceMessage,
-    ErrorData, FinishData, TokenData, UsageBlock,
+    ErrorData, FinishData, MessageParam, TokenData, UsageBlock,
 )
 from src.shared.db.models import Tenant
+from src.shared.guardrails.base import GuardrailsChecker, GuardrailsResult
 from src.shared.policy.checker import PolicyChecker, PolicyContext, PolicyExceededError
 from src.shared.schemas.envelope import CostBlock, GuardrailsBlock, LatencyBlock, PolicyBlock
 from src.shared.secrets.backend import MissingTenantKeyError, SecretBackend
@@ -24,8 +27,13 @@ def _new_request_id() -> str:
     return f"req_{uuid.uuid4().hex[:24]}"
 
 
+_STUB_CONTENT = "[stub] Real LLM not wired yet."
+
+
 def _stub_non_stream(
-    body: ChatRequest, tenant: Tenant, request_id: str, elapsed_ms: int
+    body: ChatRequest, tenant: Tenant, request_id: str, elapsed_ms: int,
+    input_result: GuardrailsResult, output_result: GuardrailsResult,
+    final_content: str,
 ) -> ChatResponse:
     return ChatResponse(
         id=request_id,
@@ -37,10 +45,7 @@ def _stub_non_stream(
         choices=[
             Choice(
                 index=0,
-                message=ChoiceMessage(
-                    role="assistant",
-                    content="[stub] Real LLM not wired yet.",
-                ),
+                message=ChoiceMessage(role="assistant", content=final_content),
                 finish_reason="stop",
             )
         ],
@@ -48,7 +53,11 @@ def _stub_non_stream(
         cost=CostBlock(computed_usd=0.0, pricing_version=0),
         latency_ms=LatencyBlock(total=elapsed_ms, upstream=elapsed_ms),
         cache=CacheBlock(our_cache_hit=False),
-        guardrails=GuardrailsBlock(),
+        guardrails=GuardrailsBlock(
+            input_flags=input_result.flags,
+            output_flags=output_result.flags,
+            redactions_applied=input_result.redactions + output_result.redactions,
+        ),
         policy=PolicyBlock(),
     )
 
@@ -88,6 +97,7 @@ async def chat(
     body: ChatRequest, request: Request, tenant: Tenant = Depends(get_tenant),
     secret_backend: SecretBackend = Depends(get_secret_backend),
     policy_checker: PolicyChecker = Depends(get_policy_checker),
+    guardrails: GuardrailsChecker = Depends(get_guardrails),
 ) -> ChatResponse:
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
@@ -103,13 +113,22 @@ async def chat(
         ))
     except PolicyExceededError as e:
         raise HTTPException(status_code=429, detail=e.detail)
-    # TODO: Step 6 — guardrails input
+    input_result = await guardrails.check_input([m.model_dump() for m in normalised.messages])
+    if input_result.blocked:
+        raise HTTPException(status_code=400, detail="guardrails_blocked")
+    if input_result.modified_messages is not None:
+        normalised = normalised.model_copy(update={
+            "messages": [MessageParam(**m) for m in input_result.modified_messages]
+        })
     # TODO: Step 7 — cache lookup
     # TODO: Step 8 — route to provider + upstream call
-    # TODO: Step 9 — guardrails output
+    output_result = await guardrails.check_output(_STUB_CONTENT)
+    if output_result.blocked:
+        raise HTTPException(status_code=400, detail="guardrails_blocked")
+    final_content = output_result.modified_content or _STUB_CONTENT
     # TODO: Step 10 — ledger write
     elapsed_ms = int((time.monotonic() - start) * 1000)
-    return _stub_non_stream(body, tenant, request_id, elapsed_ms)
+    return _stub_non_stream(body, tenant, request_id, elapsed_ms, input_result, output_result, final_content)
 
 
 @router.post("/chat/stream")
@@ -117,6 +136,7 @@ async def chat_stream(
     body: ChatRequest, request: Request, tenant: Tenant = Depends(get_tenant),
     secret_backend: SecretBackend = Depends(get_secret_backend),
     policy_checker: PolicyChecker = Depends(get_policy_checker),
+    guardrails: GuardrailsChecker = Depends(get_guardrails),
 ) -> StreamingResponse:
     request_id = request.headers.get("x-request-id") or _new_request_id()
     normalised = normalise(body)
@@ -131,10 +151,16 @@ async def chat_stream(
         ))
     except PolicyExceededError as e:
         raise HTTPException(status_code=429, detail=e.detail)
-    # TODO: Step 6 — guardrails input
+    input_result = await guardrails.check_input([m.model_dump() for m in normalised.messages])
+    if input_result.blocked:
+        raise HTTPException(status_code=400, detail="guardrails_blocked")
+    if input_result.modified_messages is not None:
+        normalised = normalised.model_copy(update={
+            "messages": [MessageParam(**m) for m in input_result.modified_messages]
+        })
     # TODO: Step 7 — cache lookup
     # TODO: Step 8 — route to provider + upstream call
-    # TODO: Step 9 — guardrails output
+    # TODO: Step 9 (streaming) — check_output_chunk per token, check_output at finish
     # TODO: Step 10 — ledger write
     return StreamingResponse(
         _stub_stream(body, request_id),

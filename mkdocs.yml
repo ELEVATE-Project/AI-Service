@@ -25,3 +25,4 @@ nav:
       - Auth & Tenants: auth-and-tenants.md
       - Keys & Secrets CLI: keys-cli.md
       - Database Models: models.md
+      - Guardrails: guardrails.md

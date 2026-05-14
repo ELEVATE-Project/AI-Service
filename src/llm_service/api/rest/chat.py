@@ -8,12 +8,17 @@ from collections.abc import AsyncIterator
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from src.llm_service.api.deps import get_guardrails, get_policy_checker, get_secret_backend, get_tenant
+from src.llm_service.api.deps import (
+    get_cache, get_guardrails, get_policy_checker, get_secret_backend, get_tenant,
+)
+from src.llm_service.cache.base import CacheBackend
+from src.llm_service.cache.keys import make_cache_key
 from src.llm_service.normaliser import normalise
 from src.llm_service.schemas.chat import (
     CacheBlock, ChatRequest, ChatResponse, Choice, ChoiceMessage,
     ErrorData, FinishData, MessageParam, TokenData, UsageBlock,
 )
+from src.shared.config import settings
 from src.shared.db.models import Tenant
 from src.shared.guardrails.base import GuardrailsChecker, GuardrailsResult
 from src.shared.policy.checker import PolicyChecker, PolicyContext, PolicyExceededError
@@ -98,6 +103,7 @@ async def chat(
     secret_backend: SecretBackend = Depends(get_secret_backend),
     policy_checker: PolicyChecker = Depends(get_policy_checker),
     guardrails: GuardrailsChecker = Depends(get_guardrails),
+    cache: CacheBackend = Depends(get_cache),
 ) -> ChatResponse:
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
@@ -120,7 +126,10 @@ async def chat(
         normalised = normalised.model_copy(update={
             "messages": [MessageParam(**m) for m in input_result.modified_messages]
         })
-    # TODO: Step 7 — cache lookup
+    cache_key = make_cache_key(tenant.id, normalised)
+    cached = await cache.get(cache_key)
+    if cached:
+        return cached.model_copy(update={"cache": CacheBlock(our_cache_hit=True)})
     # TODO: Step 8 — route to provider + upstream call
     output_result = await guardrails.check_output(_STUB_CONTENT)
     if output_result.blocked:
@@ -128,7 +137,9 @@ async def chat(
     final_content = output_result.modified_content or _STUB_CONTENT
     # TODO: Step 10 — ledger write
     elapsed_ms = int((time.monotonic() - start) * 1000)
-    return _stub_non_stream(body, tenant, request_id, elapsed_ms, input_result, output_result, final_content)
+    response = _stub_non_stream(body, tenant, request_id, elapsed_ms, input_result, output_result, final_content)
+    await cache.set(cache_key, response, ttl_seconds=settings.cache_ttl_seconds)
+    return response
 
 
 @router.post("/chat/stream")
@@ -137,7 +148,9 @@ async def chat_stream(
     secret_backend: SecretBackend = Depends(get_secret_backend),
     policy_checker: PolicyChecker = Depends(get_policy_checker),
     guardrails: GuardrailsChecker = Depends(get_guardrails),
+    cache: CacheBackend = Depends(get_cache),
 ) -> StreamingResponse:
+    start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
     normalised = normalise(body)
     try:
@@ -158,10 +171,38 @@ async def chat_stream(
         normalised = normalised.model_copy(update={
             "messages": [MessageParam(**m) for m in input_result.modified_messages]
         })
-    # TODO: Step 7 — cache lookup
+    cache_key = make_cache_key(tenant.id, normalised)
+    cached = await cache.get(cache_key)
+    if cached:
+        finish = FinishData(
+            id=request_id,
+            finish_reason=cached.choices[0].finish_reason,
+            usage=cached.usage,
+            cost=cached.cost,
+            latency_ms=cached.latency_ms,
+            cache=CacheBlock(our_cache_hit=True),
+            guardrails=cached.guardrails,
+            policy=cached.policy,
+        )
+
+        async def _cached_stream() -> AsyncIterator[str]:
+            content = cached.choices[0].message.content or ""
+            if content:
+                yield f"event: token\ndata: {TokenData(index=0, delta=content).model_dump_json()}\n\n"
+            yield f"event: finish\ndata: {finish.model_dump_json()}\n\n"
+
+        return StreamingResponse(
+            _cached_stream(), media_type="text/event-stream",
+            headers={"X-Request-Id": request_id, "Cache-Control": "no-cache", "Connection": "keep-alive"},
+        )
     # TODO: Step 8 — route to provider + upstream call
     # TODO: Step 9 (streaming) — check_output_chunk per token, check_output at finish
     # TODO: Step 10 — ledger write
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    stub_response = _stub_non_stream(
+        body, tenant, request_id, elapsed_ms, input_result, GuardrailsResult(), _STUB_CONTENT,
+    )
+    await cache.set(cache_key, stub_response, ttl_seconds=settings.cache_ttl_seconds)
     return StreamingResponse(
         _stub_stream(body, request_id),
         media_type="text/event-stream",

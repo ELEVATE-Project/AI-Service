@@ -5,6 +5,8 @@ import functools
 from fastapi import Depends
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.llm_service.cache.base import CacheBackend
+from src.llm_service.cache.redis_cache import RedisCache
 from src.shared.auth import get_tenant as _get_tenant
 from src.shared.config import settings
 from src.shared.db import get_db
@@ -62,3 +64,12 @@ def _build_guardrails() -> GuardrailsChecker:
 
 def get_guardrails() -> GuardrailsChecker:
     return _build_guardrails()
+
+
+@functools.lru_cache(maxsize=1)
+def _build_cache() -> CacheBackend:
+    return RedisCache(settings.redis_url)
+
+
+def get_cache() -> CacheBackend:
+    return _build_cache()

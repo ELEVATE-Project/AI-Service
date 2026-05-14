@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     guardrails_llama_guard_api_base: Optional[str]
     guardrails_size_cap_input_chars: int
     guardrails_size_cap_output_chars: int
+    cache_ttl_seconds: int
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

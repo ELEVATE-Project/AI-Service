@@ -26,3 +26,4 @@ nav:
       - Keys & Secrets CLI: keys-cli.md
       - Database Models: models.md
       - Guardrails: guardrails.md
+      - Response Cache: cache.md

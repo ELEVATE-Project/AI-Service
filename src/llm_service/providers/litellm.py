@@ -1,31 +1,90 @@
 from __future__ import annotations
 
+import asyncio
+import random
 import time
 from collections.abc import AsyncIterator
 from typing import Any, Optional
 
+import httpx
 import litellm
 
-from src.llm_service.providers.base import BaseLLMProvider, StreamEvent, TransportFinishData
+from src.llm_service.providers.base import (
+    BaseLLMProvider, StreamEvent, TransportFinishData, UpstreamTransportError,
+)
 from src.llm_service.schemas.chat import (
-    CacheBlock, ChatResponse, Choice, ChoiceMessage,
+    CacheBlock, ChatResponse, Choice, ChoiceMessage, ErrorData,
     NormalisedLLMRequest, TokenData, ToolUseData, UsageBlock,
 )
+from src.shared.config import settings
 from src.shared.db.enums import KeyFormat, Transport
 from src.shared.schemas.envelope import CostBlock, GuardrailsBlock, LatencyBlock, PolicyBlock
 from src.shared.secrets.backend import TenantKeyPayload
 
-# Providers where our name differs from LiteLLM's expected model prefix.
-# All other provider names are passed through as-is (e.g. "groq", "gemini").
-#
-# custom_endpoint — any server that speaks the OpenAI wire protocol at a custom URL.
-#   Covers HuggingFace Inference Endpoints, self-hosted TGI, vLLM, Ollama, etc.
-#   Tenant stores: key_format=api_key, data={"api_key": "<token or 'none'>",
-#                  "api_base": "https://xyz.us-east-1.aws.endpoints.huggingface.cloud"}
-#   Request:       {"provider": "custom_endpoint", "model": "meta-llama/Llama-3-8b-instruct"}
 _PROVIDER_REMAP: dict[str, str] = {
-    "custom_endpoint": "openai",
+    "custom_endpoint": "http://<endpoint>",
 }
+
+_RETRYABLE_ERRORS = (
+    litellm.Timeout,
+    litellm.ServiceUnavailableError,
+    litellm.APIConnectionError,
+    litellm.InternalServerError,
+    litellm.RateLimitError,
+)
+
+
+def _should_retry(error: Exception) -> bool:
+    return isinstance(error, _RETRYABLE_ERRORS)
+
+
+def _retry_delay(error: Exception, attempt: int) -> float:
+    """Return how long to sleep before the next attempt.
+    For rate limits, respect the provider's Retry-After header if present. Otherwise use exponential backoff with jitter.
+    """
+    if isinstance(error, litellm.RateLimitError):
+        response = getattr(error, "response", None)
+        if response is not None:
+            headers = getattr(response, "headers", None)
+            if headers is not None:
+                retry_after = headers.get("retry-after")
+                if retry_after is not None:
+                    return float(retry_after)
+    return settings.llm_retry_backoff_base_s * (2 ** attempt) + random.uniform(0, 0.5)
+
+
+def _upstream_status(error: Exception) -> Optional[int]:
+    # Only return a status code when a real upstream provider was contacted.
+    if not getattr(error, "llm_provider", ""):
+        return None
+    response = getattr(error, "response", None)
+    if response is None:
+        return None
+    return getattr(response, "status_code", None)
+
+
+def _wrap_litellm_error(error: Exception) -> UpstreamTransportError:
+    """Convert a LiteLLM exception into a structured UpstreamTransportError."""
+    if isinstance(error, litellm.Timeout):
+        return UpstreamTransportError(
+            code="upstream_timeout", message=str(error), http_status=504,
+        )
+    if isinstance(error, litellm.RateLimitError):
+        retry_after: Optional[str] = None
+        response = getattr(error, "response", None)
+        if response is not None:
+            headers = getattr(response, "headers", None)
+            if headers is not None:
+                retry_after = headers.get("retry-after")
+        return UpstreamTransportError(
+            code="upstream_rate_limited", message=str(error), http_status=502,
+            retry_after=retry_after,
+        )
+    if isinstance(error, litellm.AuthenticationError):
+        return UpstreamTransportError(
+            code="tenant_key_rejected", message=str(error), http_status=502,
+        )
+    return UpstreamTransportError(code="upstream_error", message=str(error), http_status=502)
 
 
 class LiteLLMTransport(BaseLLMProvider):
@@ -69,6 +128,10 @@ class LiteLLMTransport(BaseLLMProvider):
             kwargs["stop"] = params.stop
         if params.seed is not None:
             kwargs["seed"] = params.seed
+        if params.connect_timeout is not None or params.read_timeout is not None:
+            kwargs["timeout"] = httpx.Timeout(
+                None, connect=params.connect_timeout, read=params.read_timeout,
+            )
         return kwargs
 
     def _serialize_messages(
@@ -102,11 +165,9 @@ class LiteLLMTransport(BaseLLMProvider):
         cache_read = 0
         cache_write = 0
 
-        # OpenAI prompt cache path
         if getattr(raw_usage, "prompt_tokens_details", None):
             cache_read = getattr(raw_usage.prompt_tokens_details, "cached_tokens", 0) or 0
 
-        # Anthropic prompt cache path via LiteLLM (overrides OpenAI value if both present)
         cache_read = getattr(raw_usage, "cache_read_input_tokens", cache_read) or cache_read
         cache_write = getattr(raw_usage, "cache_creation_input_tokens", 0) or 0
 
@@ -150,12 +211,9 @@ class LiteLLMTransport(BaseLLMProvider):
         self, request: NormalisedLLMRequest, key: TenantKeyPayload
     ) -> ChatResponse:
         model_str = self._model_string(request.provider, request.model)
-        print("model_str: ", model_str)
         messages = self._serialize_messages(request.messages, request.provider)
-        print("messages: ", messages)
         credential_kwargs = self._credential_kwargs(key)
         param_kwargs = self._param_kwargs(request.params)
-        print("param_kwargs: ", param_kwargs)
 
         tool_kwargs: dict[str, Any] = {}
         if request.tools:
@@ -163,19 +221,22 @@ class LiteLLMTransport(BaseLLMProvider):
         if request.tool_choice is not None:
             tool_kwargs["tool_choice"] = request.tool_choice
 
-        raw = await litellm.acompletion(
-            model=model_str,
-            messages=messages,
-            drop_params=True,
-            **tool_kwargs,
-            **credential_kwargs,
-            **param_kwargs,
-        )
+        raw = None
+        for attempt in range(settings.llm_retry_max_attempts):
+            try:
+                raw = await litellm.acompletion(
+                    model=model_str, messages=messages, drop_params=True,
+                    **tool_kwargs, **credential_kwargs, **param_kwargs,
+                )
+                break
+            except Exception as error:
+                print(f"Attempt {attempt + 1} failed: {error}")
+                if not _should_retry(error) or attempt == settings.llm_retry_max_attempts - 1:
+                    raise _wrap_litellm_error(error) from error
+                await asyncio.sleep(_retry_delay(error, attempt))
 
         usage = self._extract_usage(raw)
         choices = self._map_choices(raw)
-        print("usage: ", usage)
-        print("choices: ", choices)
 
         return ChatResponse(
             id="",
@@ -211,57 +272,86 @@ class LiteLLMTransport(BaseLLMProvider):
         if request.tool_choice is not None:
             tool_kwargs["tool_choice"] = request.tool_choice
 
-        response_stream = await litellm.acompletion(
-            model=model_str,
-            messages=messages,
-            stream=True,
-            stream_options={"include_usage": True},
-            drop_params=True,
-            **tool_kwargs,
-            **credential_kwargs,
-            **param_kwargs,
-        )
+        # Retry connection setup before any tokens are sent to the caller.
+        response_stream = None
+        for attempt in range(settings.llm_retry_max_attempts):
+            try:
+                response_stream = await litellm.acompletion(
+                    model=model_str,
+                    messages=messages,
+                    stream=True,
+                    stream_options={"include_usage": True},
+                    drop_params=True,
+                    **tool_kwargs,
+                    **credential_kwargs,
+                    **param_kwargs,
+                )
+                break
+            except Exception as error:
+                if not _should_retry(error) or attempt == settings.llm_retry_max_attempts - 1:
+                    upstream_error = _wrap_litellm_error(error)
+                    yield StreamEvent(
+                        type="error",
+                        data=ErrorData(
+                            code=upstream_error.code, message=str(error),
+                            upstream_status=_upstream_status(error),
+                            retry_after=upstream_error.retry_after,
+                        ),
+                    )
+                    return
+                await asyncio.sleep(_retry_delay(error, attempt))
+
         final_usage = UsageBlock()
         final_finish_reason = "stop"
 
-        async for chunk in response_stream:
-            if not chunk.choices:
-                if getattr(chunk, "usage", None):
-                    final_usage = self._extract_usage(chunk)
-                continue
+        # Once iteration starts we cannot retry — emit an error event on failure.
+        try:
+            async for chunk in response_stream:
+                if not chunk.choices:
+                    if getattr(chunk, "usage", None):
+                        final_usage = self._extract_usage(chunk)
+                    continue
 
-            choice = chunk.choices[0]
-            delta_content = getattr(choice.delta, "content", None) or ""
+                choice = chunk.choices[0]
+                delta_content = getattr(choice.delta, "content", None) or ""
 
-            if delta_content:
-                yield StreamEvent(
-                    type="token",
-                    data=TokenData(index=choice.index, delta=delta_content),
-                )
-
-            for tool_call_delta in (getattr(choice.delta, "tool_calls", None) or []):
-                fn = getattr(tool_call_delta, "function", None)
-                args_fragment = (fn.arguments if fn else "") or ""
-                tool_id = tool_call_delta.id or ""
-                tool_name = (fn.name or "") if fn else ""
-                if tool_id or tool_name or args_fragment:
+                if delta_content:
                     yield StreamEvent(
-                        type="tool_use",
-                        data=ToolUseData(
-                            index=tool_call_delta.index,
-                            id=tool_id,
-                            name=tool_name,
-                            arguments_delta=args_fragment,
-                        ),
+                        type="token",
+                        data=TokenData(index=choice.index, delta=delta_content),
                     )
 
-            if choice.finish_reason:
-                final_finish_reason = choice.finish_reason
+                for tool_call_delta in (getattr(choice.delta, "tool_calls", None) or []):
+                    fn = getattr(tool_call_delta, "function", None)
+                    args_fragment = (fn.arguments if fn else "") or ""
+                    tool_id = tool_call_delta.id or ""
+                    tool_name = (fn.name or "") if fn else ""
+                    if tool_id or tool_name or args_fragment:
+                        yield StreamEvent(
+                            type="tool_use",
+                            data=ToolUseData(
+                                index=tool_call_delta.index,
+                                id=tool_id,
+                                name=tool_name,
+                                arguments_delta=args_fragment,
+                            ),
+                        )
 
-            # Usage may arrive on the finish chunk (Anthropic) or a trailing
-            # chunk after it (OpenAI with include_usage=True) — capture either.
-            if getattr(chunk, "usage", None):
-                final_usage = self._extract_usage(chunk)
+                if choice.finish_reason:
+                    final_finish_reason = choice.finish_reason
+
+                if getattr(chunk, "usage", None):
+                    final_usage = self._extract_usage(chunk)
+
+        except Exception as stream_error:
+            yield StreamEvent(
+                type="error",
+                data=ErrorData(
+                    code="upstream_disconnected", message=str(stream_error),
+                    upstream_status=_upstream_status(stream_error),
+                ),
+            )
+            return
 
         yield StreamEvent(
             type="finish",

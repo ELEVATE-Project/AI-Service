@@ -42,6 +42,8 @@ class ChatParams(BaseModel):
     top_p: Optional[float] = None
     stop: Optional[list[str]] = None
     seed: Optional[int] = None
+    connect_timeout: Optional[float] = None
+    read_timeout: Optional[float] = None
 
 
 class ChatRequest(BaseModel):
@@ -131,3 +133,4 @@ class ErrorData(BaseModel):
     code: str
     message: str
     upstream_status: Optional[int] = None
+    retry_after: Optional[str] = None

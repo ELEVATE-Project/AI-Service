@@ -15,7 +15,7 @@ from src.llm_service.cache.base import CacheBackend
 from src.llm_service.cache.keys import make_cache_key
 from src.llm_service.normaliser import normalise
 from src.llm_service.providers import registry
-from src.llm_service.providers.base import StreamEvent, TransportFinishData
+from src.llm_service.providers.base import StreamEvent, TransportFinishData, UpstreamTransportError
 from src.llm_service.schemas.chat import (
     CacheBlock, ChatRequest, ChatResponse, Choice, ChoiceMessage,
     ErrorData, FinishData, MessageParam, TokenData, ToolUseData, UsageBlock,
@@ -70,10 +70,15 @@ async def chat(
         return cached.model_copy(update={"cache": CacheBlock(our_cache_hit=True)})
 
     transport = registry.resolve(normalised.provider, normalised.model, "chat")
-    print("Transport: ", transport)
     upstream_start = time.monotonic()
-    response = await transport.chat(normalised, tenant_key)
-    print("Chat Response: ", response)
+    try:
+        response = await transport.chat(normalised, tenant_key)
+    except UpstreamTransportError as upstream_error:
+        extra_headers = {"Retry-After": upstream_error.retry_after} if upstream_error.retry_after else None
+        raise HTTPException(
+            status_code=upstream_error.http_status, detail=upstream_error.code,
+            headers=extra_headers,
+        )
     upstream_ms = int((time.monotonic() - upstream_start) * 1000)
 
     elapsed_ms = int((time.monotonic() - start) * 1000)
@@ -149,7 +154,6 @@ async def chat_stream(
         )
 
     transport = registry.resolve(normalised.provider, normalised.model, "stream")
-    print("Transport: ", transport)
 
     async def event_generator() -> AsyncIterator[str]:
         upstream_start = time.monotonic()
@@ -166,7 +170,6 @@ async def chat_stream(
                 accumulated_content += token_data.delta
                 if first_token_ms is None:
                     first_token_ms = int((time.monotonic() - upstream_start) * 1000)
-                print(f"event: token\ndata: {token_data.model_dump_json()}\n\n")
                 yield f"event: token\ndata: {token_data.model_dump_json()}\n\n"
             elif event.type == "tool_use":
                 tool_data: ToolUseData = event.data
@@ -175,7 +178,6 @@ async def chat_stream(
                         "id": tool_data.id, "name": tool_data.name, "args": "",
                     }
                 accumulated_tool_calls[tool_data.index]["args"] += tool_data.arguments_delta
-                print(f"event: tool_use\ndata: {tool_data.model_dump_json()}\n\n")
                 yield f"event: tool_use\ndata: {tool_data.model_dump_json()}\n\n"
             elif event.type == "finish":
                 finish_data: TransportFinishData = event.data
@@ -183,8 +185,7 @@ async def chat_stream(
                 final_finish_reason = finish_data.finish_reason
                 upstream_cache_hit = (final_usage.input_tokens_cache_read or 0) > 0
             elif event.type == "error":
-                error_data = ErrorData(code="upstream_error", message=str(event.data))
-                print(f"event: error\ndata: {error_data.model_dump_json()}\n\n")
+                error_data: ErrorData = event.data
                 yield f"event: error\ndata: {error_data.model_dump_json()}\n\n"
                 return
 
@@ -209,7 +210,6 @@ async def chat_stream(
             ),
             policy=PolicyBlock(),
         )
-        print(f"event: finish\ndata: {finish.model_dump_json()}\n\n")
         yield f"event: finish\ndata: {finish.model_dump_json()}\n\n"
 
         tool_calls = [

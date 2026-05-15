@@ -3,12 +3,25 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Literal, Union
+from typing import Literal, Optional, Union
 
 from src.llm_service.schemas.chat import (
-    ChatResponse, NormalisedLLMRequest, TokenData, ToolUseData, UsageBlock,
+    ChatResponse, ErrorData, NormalisedLLMRequest, TokenData, ToolUseData, UsageBlock,
 )
 from src.shared.secrets.backend import TenantKeyPayload
+
+
+class UpstreamTransportError(Exception):
+    """Raised by transports after retries are exhausted or on non-transient upstream errors."""
+
+    def __init__(
+        self, code: str, message: str, http_status: int,
+        retry_after: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.http_status = http_status
+        self.retry_after = retry_after
 
 
 @dataclass
@@ -20,7 +33,7 @@ class TransportFinishData:
 @dataclass
 class StreamEvent:
     type: Literal["token", "tool_use", "finish", "error"]
-    data: Union[TokenData, ToolUseData, TransportFinishData, str]
+    data: Union[TokenData, ToolUseData, TransportFinishData, ErrorData]
 
 
 class BaseLLMProvider(ABC):

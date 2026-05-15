@@ -19,6 +19,8 @@ class Settings(BaseSettings):
     guardrails_size_cap_input_chars: int
     guardrails_size_cap_output_chars: int
     cache_ttl_seconds: int
+    llm_retry_max_attempts: int
+    llm_retry_backoff_base_s: float
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

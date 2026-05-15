@@ -1057,17 +1057,3 @@ Each scenario lists: detection, error handling, and what the caller sees.
   static analyzer test `tests/unit/test_no_fallback_invariant.py` at CI
   time. AST-walks all transports, fails build if any code path can succeed
   with `key=None`.
-
-## GSTACK REVIEW REPORT
-
-| Review | Trigger | Why | Runs | Status | Findings |
-|--------|---------|-----|------|--------|----------|
-| CEO Review | `/plan-ceo-review` | Scope & strategy | 0 | — | not run |
-| Codex Review | `/codex review` | Independent 2nd opinion | 0 | — | skipped per simplicity preference |
-| Eng Review | `/plan-eng-review` | Architecture & tests (required) | 1 | issues_open | 8 issues, 7 resolved interactively (D2-D9), 3 critical failure-mode gaps catalogued, 5 critical test gaps named |
-| Design Review | `/plan-design-review` | UI/UX gaps | 0 | n/a | no UI surface in plan |
-| DX Review | `/plan-devex-review` | Developer experience | 0 | — | consider when caller-facing API stabilises |
-
-- **UNRESOLVED**: 0 from the 2026-05-07 review — all 7 raised decisions answered.
-- **CRITICAL GAPS**: 3 failure-mode gaps catalogued in "Failure scenarios" above; 5 critical test gaps recorded in `tests/unit/TODO.md` and `tests/contract/TODO.md`. Both must be closed during Phase 1 implementation, not deferred.
-- **VERDICT**: ENG REVIEW COMPLETE — implementation can begin. Critical test gaps must land alongside the code they test; failure-mode handling lands in the first chat-handler PR.

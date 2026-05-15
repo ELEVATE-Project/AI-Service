@@ -27,3 +27,7 @@ nav:
       - Database Models: models.md
       - Guardrails: guardrails.md
       - Response Cache: cache.md
+
+  - Providers:
+      - Provider Layer: providers.md
+      - Adding a Provider: adding-a-provider.md

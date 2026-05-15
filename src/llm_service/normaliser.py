@@ -15,6 +15,5 @@ def normalise(request: ChatRequest) -> NormalisedLLMRequest:
         tools=request.tools,
         tool_choice=request.tool_choice,
         params=request.params,
-        stream=request.stream,
         metadata=request.metadata,
     )

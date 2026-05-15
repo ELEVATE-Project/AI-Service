@@ -52,7 +52,6 @@ class ChatRequest(BaseModel):
     tool_choice: Optional[Any] = None
     params: Optional[ChatParams] = None
     cache_policy: Literal["auto", "explicit", "off"] = "auto"
-    stream: bool = False
     metadata: Optional[dict[str, Any]] = None
 
 
@@ -63,7 +62,6 @@ class NormalisedLLMRequest(BaseModel):
     tools: Optional[list[Tool]] = None
     tool_choice: Optional[Any] = None
     params: Optional[ChatParams] = None
-    stream: bool = False
     metadata: Optional[dict[str, Any]] = None
 
 

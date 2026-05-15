@@ -226,7 +226,7 @@ curl -s -X POST http://localhost:8000/v1/chat \
 
 | Field | Required | What it does |
 |-------|----------|-------------|
-| `provider` | Yes | Which LLM provider to use: `openai`, `anthropic`, `bedrock`, `hf_endpoint`, `hf_self_hosted` |
+| `provider` | Yes | Which LLM provider to use: `openai`, `anthropic`, `bedrock`, `custom_endpoint` |
 | `model` | Yes | Model ID, e.g. `gpt-4o`, `claude-sonnet-4-5` |
 | `messages` | Yes | List of messages. Each has `role` (`user`, `assistant`, `system`, `tool`) and `content` |
 | `params.temperature` | No | 0.0–2.0. Lower = more deterministic |

@@ -226,8 +226,7 @@ overrides = {
     ("openai",         "*", "*"): OpenAICompatibleTransport,  # api.openai.com
     ("anthropic",      "*", "*"): AnthropicTransport,         # api.anthropic.com
     ("bedrock",        "*", "*"): BedrockTransport,           # Anthropic + Llama via boto3
-    ("hf_endpoint",    "*", "*"): OpenAICompatibleTransport,  # tenant-supplied URL+token
-    ("hf_self_hosted", "*", "*"): OpenAICompatibleTransport,  # gritworks GPU infra
+    ("custom_endpoint", "*", "*"): OpenAICompatibleTransport,  # any OpenAI-compatible URL
 }
 ```
 
@@ -533,7 +532,7 @@ Errors use the same envelope across endpoints:
 
 ```jsonc
 {
-  "provider": "anthropic",                  // anthropic | openai | bedrock | hf_endpoint | hf_self_hosted | <future>
+  "provider": "anthropic",                  // anthropic | openai | bedrock | custom_endpoint | <future>
   "model": "claude-sonnet-4-5",             // canonical model id; routing table maps to upstream id
   "messages": [
     {

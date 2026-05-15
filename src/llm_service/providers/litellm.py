@@ -87,8 +87,32 @@ def _wrap_litellm_error(error: Exception) -> UpstreamTransportError:
     return UpstreamTransportError(code="upstream_error", message=str(error), http_status=502)
 
 
+def _build_fallbacks(
+    model_str: str, regions: list[str], credential_kwargs: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Build LiteLLM fallback entries for secondary regions.
+    Returns empty list when only one (or zero) regions are configured.
+    """
+    if len(regions) <= 1:
+        return []
+    region_key = (
+        "aws_region_name" if "aws_region_name" in credential_kwargs
+        else "api_base" if "api_base" in credential_kwargs
+        else None
+    )
+    if region_key is None:
+        return []
+    return [
+        {"model": model_str, **{**credential_kwargs, region_key: region}}
+        for region in regions[1:]
+    ]
+
+
 class LiteLLMTransport(BaseLLMProvider):
     """Routes any provider through the LiteLLM in-process SDK."""
+
+    def __init__(self, regions: Optional[list[str]] = None) -> None:
+        self._regions: list[str] = regions or []
 
     def _model_string(self, provider: str, model: str) -> str:
         prefix = _PROVIDER_REMAP.get(provider, provider)
@@ -215,18 +239,29 @@ class LiteLLMTransport(BaseLLMProvider):
         credential_kwargs = self._credential_kwargs(key)
         param_kwargs = self._param_kwargs(request.params)
 
+        if self._regions:
+            if "aws_region_name" in credential_kwargs:
+                credential_kwargs["aws_region_name"] = self._regions[0]
+            elif "api_base" in credential_kwargs:
+                credential_kwargs["api_base"] = self._regions[0]
+
         tool_kwargs: dict[str, Any] = {}
         if request.tools:
             tool_kwargs["tools"] = [t.model_dump() for t in request.tools]
         if request.tool_choice is not None:
             tool_kwargs["tool_choice"] = request.tool_choice
 
+        fallback_kwargs: dict[str, Any] = {}
+        fallbacks = _build_fallbacks(model_str, self._regions, credential_kwargs)
+        if fallbacks:
+            fallback_kwargs["fallbacks"] = fallbacks
+
         raw = None
         for attempt in range(settings.llm_retry_max_attempts):
             try:
                 raw = await litellm.acompletion(
                     model=model_str, messages=messages, drop_params=True,
-                    **tool_kwargs, **credential_kwargs, **param_kwargs,
+                    **tool_kwargs, **credential_kwargs, **param_kwargs, **fallback_kwargs,
                 )
                 break
             except Exception as error:
@@ -245,6 +280,7 @@ class LiteLLMTransport(BaseLLMProvider):
             provider=request.provider,
             model=request.model,
             transport=Transport.LITELLM,
+            region=self._regions[0] if self._regions else None,
             choices=choices,
             usage=usage,
             cost=CostBlock(),
@@ -266,11 +302,22 @@ class LiteLLMTransport(BaseLLMProvider):
         credential_kwargs = self._credential_kwargs(key)
         param_kwargs = self._param_kwargs(request.params)
 
+        if self._regions:
+            if "aws_region_name" in credential_kwargs:
+                credential_kwargs["aws_region_name"] = self._regions[0]
+            elif "api_base" in credential_kwargs:
+                credential_kwargs["api_base"] = self._regions[0]
+
         tool_kwargs: dict[str, Any] = {}
         if request.tools:
             tool_kwargs["tools"] = [t.model_dump() for t in request.tools]
         if request.tool_choice is not None:
             tool_kwargs["tool_choice"] = request.tool_choice
+
+        fallback_kwargs: dict[str, Any] = {}
+        fallbacks = _build_fallbacks(model_str, self._regions, credential_kwargs)
+        if fallbacks:
+            fallback_kwargs["fallbacks"] = fallbacks
 
         # Retry connection setup before any tokens are sent to the caller.
         response_stream = None
@@ -285,6 +332,7 @@ class LiteLLMTransport(BaseLLMProvider):
                     **tool_kwargs,
                     **credential_kwargs,
                     **param_kwargs,
+                    **fallback_kwargs,
                 )
                 break
             except Exception as error:

@@ -10,13 +10,12 @@ class RoutingEntry:
     transport_cls: type[BaseLLMProvider]
     regions: list[str] = field(default_factory=list)
 
-from src.llm_service.providers.litellm import LiteLLMTransport
+from src.llm_service.providers.anthropic import AnthropicTransport
+from src.llm_service.providers.bedrock import BedrockTransport
 
-# Direct adapter overrides land here as each provider adapter is added.
 _OVERRIDE: dict[tuple[str, str, str], RoutingEntry] = {
-    # ("openai",    "*", "chat"):   RoutingEntry(OpenAICompatibleTransport),
-    # ("anthropic", "*", "chat"):   RoutingEntry(AnthropicTransport),
-    # ("bedrock", "*", "chat"): RoutingEntry(LiteLLMTransport, regions=["us-fake-99", "us-west-2"]),
+    ("anthropic", "*", "batch"): RoutingEntry(AnthropicTransport),
+    ("bedrock", "*", "batch"): RoutingEntry(BedrockTransport),
 }
 
 

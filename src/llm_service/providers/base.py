@@ -8,6 +8,7 @@ from typing import Literal, Optional, Union
 from src.llm_service.schemas.chat import (
     ChatResponse, ErrorData, NormalisedLLMRequest, TokenData, ToolUseData, UsageBlock,
 )
+from src.shared.db.models import BatchJob
 from src.shared.secrets.backend import TenantKeyPayload
 
 
@@ -46,3 +47,11 @@ class BaseLLMProvider(ABC):
     async def stream(
         self, request: NormalisedLLMRequest, key: TenantKeyPayload
     ) -> AsyncIterator[StreamEvent]: ...
+
+    async def batch_submit(self, jobs: list[BatchJob], key: TenantKeyPayload) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not support batch submission")
+
+    async def batch_poll(
+        self, upstream_batch_id: str, jobs: list[BatchJob], key: TenantKeyPayload
+    ) -> None:
+        raise NotImplementedError(f"{type(self).__name__} does not support batch polling")

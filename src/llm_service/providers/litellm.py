@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
+import json
 import random
 import time
 from collections.abc import AsyncIterator
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 import httpx
@@ -17,7 +20,8 @@ from src.llm_service.schemas.chat import (
     NormalisedLLMRequest, TokenData, ToolUseData, UsageBlock,
 )
 from src.shared.config import settings
-from src.shared.db.enums import KeyFormat, Transport
+from src.shared.db.enums import BatchJobStatus, KeyFormat, Transport
+from src.shared.db.models import BatchJob
 from src.shared.schemas.envelope import CostBlock, GuardrailsBlock, LatencyBlock, PolicyBlock
 from src.shared.secrets.backend import TenantKeyPayload
 
@@ -126,11 +130,15 @@ class LiteLLMTransport(BaseLLMProvider):
                 kwargs["api_base"] = key.data["api_base"]
             return kwargs
         if key.key_format == KeyFormat.AWS_CREDENTIALS:
-            return {
+            kwargs = {
                 "aws_access_key_id": key.data["access_key_id"],
                 "aws_secret_access_key": key.data["secret_access_key"],
                 "aws_region_name": key.data.get("region", "us-east-1"),
             }
+            for optional_key in ("aws_session_token", "aws_role_name", "s3_bucket_name"):
+                if key.data.get(optional_key):
+                    kwargs[optional_key] = key.data[optional_key]
+            return kwargs
         if key.key_format == KeyFormat.ENDPOINT_PAIR:
             return {
                 "api_base": key.data["endpoint_url"],
@@ -408,3 +416,108 @@ class LiteLLMTransport(BaseLLMProvider):
                 usage=final_usage,
             ),
         )
+
+    async def batch_submit(self, jobs: list[BatchJob], key: TenantKeyPayload) -> None:
+        provider = jobs[0].provider
+        credential_kwargs = self._credential_kwargs(key)
+        lines = []
+        for job in jobs:
+            req = job.normalised_request
+            body: dict[str, Any] = {"model": req["model"], "messages": req["messages"]}
+            if req.get("tools"):
+                body["tools"] = req["tools"]
+            if req.get("tool_choice") is not None:
+                body["tool_choice"] = req["tool_choice"]
+            for param_key in ("temperature", "max_tokens", "top_p", "stop", "seed"):
+                value = (req.get("params") or {}).get(param_key)
+                if value is not None:
+                    body[param_key] = value
+            lines.append(json.dumps({
+                "custom_id": str(job.id), "method": "POST",
+                "url": "/v1/chat/completions", "body": body,
+            }))
+        jsonl_bytes = "\n".join(lines).encode()
+        file_obj = await litellm.acreate_file(
+            file=("batch.jsonl", io.BytesIO(jsonl_bytes), "application/jsonl"),
+            purpose="batch",
+            custom_llm_provider=provider,
+            **credential_kwargs,
+        )
+        batch = await litellm.acreate_batch(
+            input_file_id=file_obj.id,
+            endpoint="/v1/chat/completions",
+            completion_window="24h",
+            custom_llm_provider=provider,
+            **credential_kwargs,
+        )
+        submitted_at = datetime.now(timezone.utc)
+        for job in jobs:
+            job.status = BatchJobStatus.SUBMITTED
+            job.upstream_batch_id = batch.id
+            job.upstream_file_id = file_obj.id
+            job.submitted_at = submitted_at
+
+    async def batch_poll(
+        self, upstream_batch_id: str, jobs: list[BatchJob], key: TenantKeyPayload,
+    ) -> None:
+        provider = jobs[0].provider
+        credential_kwargs = self._credential_kwargs(key)
+        batch = await litellm.aretrieve_batch(
+            batch_id=upstream_batch_id,
+            custom_llm_provider=provider,
+            **credential_kwargs,
+        )
+        if batch.status not in ("completed", "failed", "cancelled", "expired"):
+            return
+        jobs_by_id = {str(job.id): job for job in jobs}
+        completed_at = datetime.now(timezone.utc)
+        if batch.status == "completed" and batch.output_file_id:
+            content = await litellm.afile_content(
+                file_id=batch.output_file_id,
+                custom_llm_provider=provider,
+                **credential_kwargs,
+            )
+            for line in content.text.splitlines():
+                if not line.strip():
+                    continue
+                result_item = json.loads(line)
+                job = jobs_by_id.get(result_item.get("custom_id", ""))
+                if job is None:
+                    continue
+                if result_item.get("error"):
+                    job.status = BatchJobStatus.FAILED
+                    job.error_code = result_item["error"].get("code", "upstream_error")
+                else:
+                    result_body = result_item["response"]["body"]
+                    raw_usage = result_body.get("usage", {})
+                    job.result = ChatResponse(
+                        id=job.request_id, created=int(time.time()), tenant_id=job.tenant_id,
+                        provider=job.provider, model=job.model, transport=Transport.LITELLM,
+                        choices=[
+                            Choice(
+                                index=c["index"],
+                                message=ChoiceMessage(
+                                    role=c["message"]["role"],
+                                    content=c["message"].get("content"),
+                                    tool_calls=c["message"].get("tool_calls"),
+                                ),
+                                finish_reason=c.get("finish_reason") or "stop",
+                            )
+                            for c in result_body.get("choices", [])
+                        ],
+                        usage=UsageBlock(
+                            input_tokens=raw_usage.get("prompt_tokens", 0),
+                            output_tokens=raw_usage.get("completion_tokens", 0),
+                            total_tokens=raw_usage.get("total_tokens", 0),
+                        ),
+                        cost=CostBlock(), latency_ms=LatencyBlock(),
+                        cache=CacheBlock(our_cache_hit=False),
+                        guardrails=GuardrailsBlock(), policy=PolicyBlock(),
+                    ).model_dump()
+                    job.status = BatchJobStatus.COMPLETE
+                job.completed_at = completed_at
+        else:
+            for job in jobs:
+                job.status = BatchJobStatus.FAILED
+                job.error_code = f"batch_{batch.status}"
+                job.completed_at = completed_at

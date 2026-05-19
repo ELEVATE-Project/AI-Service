@@ -3,10 +3,11 @@ from __future__ import annotations
 import time
 import uuid
 from collections.abc import AsyncIterator
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.llm_service.api.deps import (
     get_cache, get_guardrails, get_policy_checker, get_secret_backend, get_tenant,
@@ -16,14 +17,18 @@ from src.llm_service.cache.keys import make_cache_key
 from src.llm_service.normaliser import normalise
 from src.llm_service.providers import registry
 from src.llm_service.providers.base import StreamEvent, TransportFinishData, UpstreamTransportError
+from src.llm_service.schemas.batch import BatchAcceptedResponse
 from src.llm_service.schemas.chat import (
     CacheBlock, ChatRequest, ChatResponse, Choice, ChoiceMessage,
     ErrorData, FinishData, MessageParam, TokenData, ToolUseData, UsageBlock,
 )
 from src.shared.config import settings
-from src.shared.db.models import Tenant
+from src.shared.db import get_db
+from src.shared.db.enums import BatchJobStatus
+from src.shared.db.models import BatchJob, Tenant
 from src.shared.guardrails.base import GuardrailsChecker
 from src.shared.policy.checker import PolicyChecker, PolicyContext, PolicyExceededError
+from src.shared.queue.tasks import BATCH_ELIGIBLE_PROVIDERS
 from src.shared.schemas.envelope import CostBlock, GuardrailsBlock, LatencyBlock, PolicyBlock
 from src.shared.secrets.backend import MissingTenantKeyError, SecretBackend
 
@@ -34,15 +39,15 @@ def _new_request_id() -> str:
     return f"req_{uuid.uuid4().hex[:24]}"
 
 
-
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat", response_model=ChatResponse, responses={202: {"model": BatchAcceptedResponse}})
 async def chat(
     body: ChatRequest, request: Request, tenant: Tenant = Depends(get_tenant),
     secret_backend: SecretBackend = Depends(get_secret_backend),
     policy_checker: PolicyChecker = Depends(get_policy_checker),
     guardrails: GuardrailsChecker = Depends(get_guardrails),
     cache: CacheBackend = Depends(get_cache),
-) -> ChatResponse:
+    db: AsyncSession = Depends(get_db),
+) -> Union[ChatResponse, JSONResponse]:
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
     normalised = normalise(body)
@@ -68,6 +73,26 @@ async def chat(
     cached = await cache.get(cache_key)
     if cached:
         return cached.model_copy(update={"cache": CacheBlock(our_cache_hit=True)})
+
+    if body.metadata and body.metadata.get("batch") is True:
+        if normalised.provider not in BATCH_ELIGIBLE_PROVIDERS:
+            raise HTTPException(status_code=422, detail="provider_not_batch_eligible")
+        batch_job = BatchJob(
+            request_id=request_id,
+            tenant_id=tenant.id,
+            provider=normalised.provider,
+            model=normalised.model,
+            normalised_request=normalised.model_dump(exclude_none=True),
+            status=BatchJobStatus.PENDING,
+        )
+        db.add(batch_job)
+        await db.commit()
+        return JSONResponse(
+            status_code=202,
+            content=BatchAcceptedResponse(
+                job_id=str(batch_job.id), request_id=request_id, status="pending",
+            ).model_dump(),
+        )
 
     transport = registry.resolve(normalised.provider, normalised.model, "chat")
     upstream_start = time.monotonic()

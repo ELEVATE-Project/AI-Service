@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 import asyncpg
+import boto3
 import keyring
 from cryptography.fernet import Fernet
 
@@ -81,6 +82,80 @@ def _ask_yn(prompt: str) -> bool:
             return False
 
 
+# ── bedrock role auto-creation ────────────────────────────────────────────────
+
+_BEDROCK_ROLE_NAME = "ai-service-bedrock-batch"
+
+_BEDROCK_TRUST_POLICY = json.dumps({
+    "Version": "2012-10-17",
+    "Statement": [{
+        "Effect": "Allow",
+        "Principal": {"Service": "bedrock.amazonaws.com"},
+        "Action": "sts:AssumeRole",
+    }],
+})
+
+
+def _bedrock_inline_policy(s3_bucket_name: str) -> str:
+    return json.dumps({
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": ["s3:GetObject", "s3:ListBucket"],
+                "Resource": [
+                    f"arn:aws:s3:::{s3_bucket_name}",
+                    f"arn:aws:s3:::{s3_bucket_name}/*",
+                ],
+            },
+            {
+                "Effect": "Allow",
+                "Action": "s3:PutObject",
+                "Resource": f"arn:aws:s3:::{s3_bucket_name}/*",
+            },
+            {
+                "Effect": "Allow",
+                "Action": "bedrock:InvokeModel",
+                "Resource": "*",
+            },
+        ],
+    })
+
+
+def _create_bedrock_batch_role(data: dict[str, str]) -> str:
+    """Create (or reuse) the Bedrock batch IAM role and return its ARN."""
+    creds: dict[str, str] = {
+        "aws_access_key_id": data["access_key_id"],
+        "aws_secret_access_key": data["secret_access_key"],
+        "region_name": data.get("region", "us-east-1"),
+    }
+    if data.get("aws_session_token"):
+        creds["aws_session_token"] = data["aws_session_token"]
+
+    iam = boto3.client("iam", **creds)
+    s3_bucket_name = data.get("s3_bucket_name", "")
+
+    try:
+        role_arn: str = iam.create_role(
+            RoleName=_BEDROCK_ROLE_NAME,
+            AssumeRolePolicyDocument=_BEDROCK_TRUST_POLICY,
+            Description="Auto-created by ai-service for Bedrock batch inference.",
+        )["Role"]["Arn"]
+        print(f"  ✓ IAM role created: {role_arn}")
+    except iam.exceptions.EntityAlreadyExistsException:
+        role_arn = iam.get_role(RoleName=_BEDROCK_ROLE_NAME)["Role"]["Arn"]
+        print(f"  ✓ IAM role already exists: {role_arn}")
+
+    iam.put_role_policy(
+        RoleName=_BEDROCK_ROLE_NAME,
+        PolicyName="bedrock-batch-s3-access",
+        PolicyDocument=_bedrock_inline_policy(s3_bucket_name),
+    )
+    print(f"  ✓ Inline policy attached (S3 bucket: {s3_bucket_name or '*'})")
+    print("  ⚠  IAM changes take ~10s to propagate — wait before submitting a batch job.")
+    return role_arn
+
+
 # ── key data collection ───────────────────────────────────────────────────────
 
 def _collect_key_data(provider: str) -> tuple[str, dict[str, str]]:
@@ -100,11 +175,30 @@ def _collect_key_data(provider: str) -> tuple[str, dict[str, str]]:
         return key_format, data
 
     if key_format == "aws_credentials":
-        return key_format, {
+        data = {
             "access_key_id":     _ask("  AWS Access Key ID"),
             "secret_access_key": _ask("  AWS Secret Access Key"),
             "region":            _ask("  AWS Region", default="us-east-1"),
         }
+        session_token = _ask("  AWS Session Token (press Enter to skip)")
+        if session_token:
+            data["aws_session_token"] = session_token
+        role_name = _ask("  AWS Role Name (press Enter to skip)")
+        if role_name:
+            data["aws_role_name"] = role_name
+        s3_bucket = _ask("  S3 bucket name for batch inference e.g. my-bucket (press Enter to skip)")
+        if s3_bucket:
+            data["s3_bucket_name"] = s3_bucket
+        role_arn = _ask("  IAM Role ARN for batch inference (press Enter to auto-create)")
+        if role_arn:
+            data["role_arn"] = role_arn
+        elif data.get("s3_bucket_name") and _ask_yn("  No ARN provided — auto-create the IAM role now?"):
+            try:
+                data["role_arn"] = _create_bedrock_batch_role(data)
+            except Exception as exc:
+                print(f"  ✗ Role creation failed: {exc}")
+                print("  You can add the role_arn manually later by re-running this script.")
+        return key_format, data
 
     if key_format == "endpoint_pair":
         return key_format, {
@@ -185,7 +279,7 @@ async def _run(db_url: str) -> None:
             add_key = _ask_yn(f"\nAdd a provider key for '{tenant_id}'?")
             while add_key:
                 print()
-                provider = _ask("  Provider (openai / anthropic / bedrock / groq / custom_endpoint)")
+                provider = _ask("  Provider (openai / azure / anthropic / bedrock / vertex_ai / groq / custom_endpoint)")
                 key_format, data = _collect_key_data(provider)
                 encrypted = fernet.encrypt(json.dumps(data).encode()).decode()
                 await conn.execute(

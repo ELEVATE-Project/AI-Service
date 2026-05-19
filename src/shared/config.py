@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     cache_ttl_seconds: int
     llm_retry_max_attempts: int
     llm_retry_backoff_base_s: float
+    batch_max_submit_attempts: int
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

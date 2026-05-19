@@ -13,6 +13,7 @@ source = { editable = "." }
 dependencies = [
     { name = "alembic" },
     { name = "anthropic" },
+    { name = "arq" },
     { name = "asyncpg" },
     { name = "boto3" },
     { name = "click" },
@@ -22,7 +23,6 @@ dependencies = [
     { name = "keyring" },
     { name = "langfuse" },
     { name = "litellm" },
-    { name = "mkdocs" },
     { name = "openai" },
     { name = "presidio-analyzer" },
     { name = "presidio-anonymizer" },
@@ -34,11 +34,6 @@ dependencies = [
     { name = "sqlalchemy", extra = ["asyncio"] },
     { name = "structlog" },
     { name = "uvicorn", extra = ["standard"] },
-]
-
-[package.optional-dependencies]
-queue = [
-    { name = "arq" },
 ]
 
 [package.dev-dependencies]
@@ -57,7 +52,7 @@ dev = [
 requires-dist = [
     { name = "alembic", specifier = ">=1.13" },
     { name = "anthropic", specifier = ">=0.34" },
-    { name = "arq", marker = "extra == 'queue'", specifier = ">=0.26" },
+    { name = "arq", specifier = ">=0.26" },
     { name = "asyncpg", specifier = ">=0.29" },
     { name = "boto3", specifier = ">=1.35" },
     { name = "click", specifier = ">=8.1" },
@@ -67,7 +62,6 @@ requires-dist = [
     { name = "keyring", specifier = ">=24.0" },
     { name = "langfuse", specifier = ">=2.40" },
     { name = "litellm", specifier = ">=1.0" },
-    { name = "mkdocs", specifier = ">=1.6.1" },
     { name = "openai", specifier = ">=1.40" },
     { name = "presidio-analyzer", specifier = ">=2.2" },
     { name = "presidio-anonymizer", specifier = ">=2.2" },
@@ -80,7 +74,6 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.1" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.30" },
 ]
-provides-extras = ["queue"]
 
 [package.metadata.requires-dev]
 dev = [

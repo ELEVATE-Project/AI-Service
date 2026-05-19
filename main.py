@@ -1,4 +1,6 @@
 from fastapi import FastAPI
+
+from src.llm_service.api.rest.batch import router as batch_router
 from src.llm_service.api.rest.chat import router as chat_router
 
 app = FastAPI(
@@ -8,3 +10,4 @@ app = FastAPI(
 )
 
 app.include_router(chat_router)
+app.include_router(batch_router)

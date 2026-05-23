@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Any, Literal, Optional
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 from src.shared.schemas.envelope import CostBlock, GuardrailsBlock, LatencyBlock, PolicyBlock
 
 
@@ -32,8 +32,16 @@ class ToolFunction(BaseModel):
 
 
 class Tool(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     type: str = "function"
-    function: ToolFunction
+    name: Optional[str] = None
+    function: Optional[ToolFunction] = None
+
+
+class WebSearchOptions(BaseModel):
+    search_context_size: Optional[str] = None
+    user_location: Optional[dict[str, Any]] = None
 
 
 class ChatParams(BaseModel):
@@ -44,6 +52,7 @@ class ChatParams(BaseModel):
     seed: Optional[int] = None
     connect_timeout: Optional[float] = None
     read_timeout: Optional[float] = None
+    web_search_options: Optional[WebSearchOptions] = None
 
 
 class ChatRequest(BaseModel):
@@ -71,6 +80,7 @@ class ChoiceMessage(BaseModel):
     role: str
     content: Optional[str] = None
     tool_calls: Optional[list[dict[str, Any]]] = None
+    citations: Optional[list[Any]] = None
 
 
 class Choice(BaseModel):
@@ -127,6 +137,7 @@ class FinishData(BaseModel):
     cache: CacheBlock
     guardrails: GuardrailsBlock
     policy: PolicyBlock
+    citations: Optional[list[Any]] = None
 
 
 class ErrorData(BaseModel):

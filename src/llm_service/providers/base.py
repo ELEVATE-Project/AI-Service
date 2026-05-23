@@ -3,7 +3,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Literal, Optional, Union
+from typing import Any, Literal, Optional, Union
 
 from src.llm_service.schemas.chat import (
     ChatResponse, ErrorData, NormalisedLLMRequest, TokenData, ToolUseData, UsageBlock,
@@ -29,6 +29,7 @@ class UpstreamTransportError(Exception):
 class TransportFinishData:
     finish_reason: str
     usage: UsageBlock
+    citations: Optional[list[Any]] = None
 
 
 @dataclass

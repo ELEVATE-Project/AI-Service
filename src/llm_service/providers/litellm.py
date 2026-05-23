@@ -164,6 +164,8 @@ class LiteLLMTransport(BaseLLMProvider):
             kwargs["timeout"] = httpx.Timeout(
                 None, connect=params.connect_timeout, read=params.read_timeout,
             )
+        if params.web_search_options is not None:
+            kwargs["web_search_options"] = params.web_search_options.model_dump(exclude_none=True)
         return kwargs
 
     def _serialize_messages(
@@ -228,12 +230,15 @@ class LiteLLMTransport(BaseLLMProvider):
                     }
                     for tool_call in raw_message.tool_calls
                 ]
+            provider_fields = getattr(raw_message, "provider_specific_fields", None) or {}
+            citations = provider_fields.get("citations") or None
             choices.append(Choice(
                 index=raw_choice.index,
                 message=ChoiceMessage(
                     role=raw_message.role,
                     content=raw_message.content,
                     tool_calls=tool_calls,
+                    citations=citations,
                 ),
                 finish_reason=raw_choice.finish_reason or "stop",
             ))
@@ -255,7 +260,7 @@ class LiteLLMTransport(BaseLLMProvider):
 
         tool_kwargs: dict[str, Any] = {}
         if request.tools:
-            tool_kwargs["tools"] = [t.model_dump() for t in request.tools]
+            tool_kwargs["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
         if request.tool_choice is not None:
             tool_kwargs["tool_choice"] = request.tool_choice
 
@@ -273,7 +278,6 @@ class LiteLLMTransport(BaseLLMProvider):
                 )
                 break
             except Exception as error:
-                print(f"Attempt {attempt + 1} failed: {error}")
                 if not _should_retry(error) or attempt == settings.llm_retry_max_attempts - 1:
                     raise _wrap_litellm_error(error) from error
                 await asyncio.sleep(_retry_delay(error, attempt))
@@ -318,7 +322,7 @@ class LiteLLMTransport(BaseLLMProvider):
 
         tool_kwargs: dict[str, Any] = {}
         if request.tools:
-            tool_kwargs["tools"] = [t.model_dump() for t in request.tools]
+            tool_kwargs["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
         if request.tool_choice is not None:
             tool_kwargs["tool_choice"] = request.tool_choice
 
@@ -359,10 +363,14 @@ class LiteLLMTransport(BaseLLMProvider):
 
         final_usage = UsageBlock()
         final_finish_reason = "stop"
+        final_citations: Optional[list[Any]] = None
+        all_chunks: list[Any] = []
 
         # Once iteration starts we cannot retry — emit an error event on failure.
         try:
             async for chunk in response_stream:
+                all_chunks.append(chunk)
+
                 if not chunk.choices:
                     if getattr(chunk, "usage", None):
                         final_usage = self._extract_usage(chunk)
@@ -409,11 +417,27 @@ class LiteLLMTransport(BaseLLMProvider):
             )
             return
 
+        # Citations are only on the assembled response, not individual chunks.
+        # stream_chunk_builder rebuilds the full ModelResponse from collected chunks.
+        if all_chunks:
+            try:
+                assembled = litellm.stream_chunk_builder(all_chunks)
+                if assembled and assembled.choices:
+                    psf = getattr(assembled.choices[0].message, "provider_specific_fields", None) or {}
+                    if isinstance(psf, dict):
+                        citations = psf.get("citations") or psf.get("web_search_results") or None
+                        if citations and not isinstance(citations, list):
+                            citations = [citations]
+                        final_citations = citations or None
+            except Exception:
+                pass
+
         yield StreamEvent(
             type="finish",
             data=TransportFinishData(
                 finish_reason=final_finish_reason,
                 usage=final_usage,
+                citations=final_citations,
             ),
         )
 

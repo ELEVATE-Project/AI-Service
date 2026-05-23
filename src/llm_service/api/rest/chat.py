@@ -189,6 +189,8 @@ async def chat_stream(
         accumulated_content = ""
         accumulated_tool_calls: dict[int, dict[str, str]] = {}
 
+        final_citations: Optional[list] = None
+
         async for event in transport.stream(normalised, tenant_key):
             if event.type == "token":
                 token_data: TokenData = event.data
@@ -208,6 +210,7 @@ async def chat_stream(
                 finish_data: TransportFinishData = event.data
                 final_usage = finish_data.usage
                 final_finish_reason = finish_data.finish_reason
+                final_citations = finish_data.citations
                 upstream_cache_hit = (final_usage.input_tokens_cache_read or 0) > 0
             elif event.type == "error":
                 error_data: ErrorData = event.data
@@ -234,6 +237,7 @@ async def chat_stream(
                 redactions_applied=input_result.redactions,
             ),
             policy=PolicyBlock(),
+            citations=final_citations,
         )
         yield f"event: finish\ndata: {finish.model_dump_json()}\n\n"
 

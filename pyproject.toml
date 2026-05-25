@@ -41,6 +41,7 @@ dependencies = [
     "spacy>=3.7",
     # CLI
     "click>=8.1",
+    "keyrings-alt>=5.0.2",
 ]
 
 

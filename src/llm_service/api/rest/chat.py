@@ -192,6 +192,7 @@ async def chat_stream(
         final_citations: Optional[list] = None
 
         async for event in transport.stream(normalised, tenant_key):
+            print(f"[stream] chunk type: {event.type}, data type: {type(event.data).__name__}, data: {event.data}")
             if event.type == "token":
                 token_data: TokenData = event.data
                 accumulated_content += token_data.delta

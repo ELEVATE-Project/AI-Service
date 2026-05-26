@@ -278,6 +278,7 @@ class LiteLLMTransport(BaseLLMProvider):
                 )
                 break
             except Exception as error:
+                print(f"[litellm.chat] attempt={attempt} error_type={type(error).__name__} error={error}")
                 if not _should_retry(error) or attempt == settings.llm_retry_max_attempts - 1:
                     raise _wrap_litellm_error(error) from error
                 await asyncio.sleep(_retry_delay(error, attempt))

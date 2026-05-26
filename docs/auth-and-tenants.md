@@ -1,118 +1,123 @@
-# Auth and Tenants
+# Auth & Tenants
 
-This explains who is allowed to call the gateway and how the gateway knows who they are.
+Every request to the gateway carries two pieces of identity: **who is calling** and **on behalf of whom**. This page explains how those are resolved and what happens when they don't check out.
 
 ---
 
 ## Two-level identity model
 
-Every request carries two pieces of identity:
+```
+Request
+  │
+  ├─ Authorization: Bearer <token>   →  resolves to a CallingService
+  └─ X-Tenant-Id: tenant_acme       →  resolves to a Tenant
+                                        (only if the service is allowed to act for it)
+```
 
-1. **Who is calling** — a `calling service` (your chatbot backend, your data pipeline, etc.)
-2. **On behalf of whom** — a `tenant` (the customer or team whose API keys and budget apply)
-
-These are kept separate on purpose. One calling service can act on behalf of multiple tenants. One tenant can be served by multiple calling services. The rules about which service can act for which tenant are stored in the database.
+These are kept separate on purpose. One calling service can act on behalf of multiple tenants. One tenant can be served by multiple calling services. The permission table (`calling_service_tenants`) is the join between them.
 
 ---
 
 ## What is a tenant?
 
-A tenant is an isolated unit. Each tenant has:
+A tenant is an isolated unit. Everything in the system belongs to a tenant:
 
-- Their own encrypted API keys (one per provider)
-- Their own usage policy (rate limits, monthly budget, model allowlist)
-- Their own ledger rows (every call is attributed to a tenant)
+- Their encrypted API keys — one per provider (Anthropic, Bedrock, OpenAI, etc.)
+- Their usage policy — monthly budget cap, model allowlist, per-request token limit
+- Their ledger rows — every upstream LLM call is attributed to exactly one tenant
 
-In local dev you have one: `tenant_dev`. In production there would be one per customer or team.
-
-Tenant IDs are simple strings like `tenant_acme` or `tenant_govx`. They're the foreign key that connects keys, ledger entries, and policies.
+Tenant IDs are slug-style strings like `saathi` or `my_project`. They appear as foreign keys in every other table.
 
 ---
 
 ## What is a calling service?
 
-A calling service is a registered application that sends requests to the gateway. Examples: a tax chatbot backend, a document summariser, an internal tool.
+A calling service is a registered backend application that sends requests to the gateway — a chatbot, a document pipeline, an internal tool. Each has:
 
-Each calling service has:
-
-- A name (just a label)
-- A **bearer token hash** — the SHA-256 of the token it will use in requests. The raw token is never stored.
-- A list of tenants it's allowed to act on behalf of
+- A name (label only)
+- A **bearer token hash** — SHA-256 of the token it sends in the `Authorization` header. The raw token is never stored anywhere.
+- Access grants to specific tenants
 
 ---
 
 ## How a request is authenticated
 
-When a request comes in:
+The auth logic lives in `src/shared/auth.py`. It runs as a FastAPI dependency before any handler executes.
+
+**Step 1 — verify the calling service**
 
 ```
-POST /v1/chat
-Authorization: Bearer my-dev-token-123
-X-Tenant-Id: tenant_dev
+Authorization: Bearer svc_<your-token>
+                        ↓
+                   SHA-256 hash
+                        ↓
+    SELECT * FROM calling_services WHERE bearer_token_hash = '<hash>'
 ```
 
-The gateway does this, in order:
+If no row matches → `401 Invalid bearer token`.
+
+The raw token is never stored. If the database leaks, attackers get useless hashes. To rotate a token, generate a new one and update the hash — the old token stops working immediately.
+
+**Step 2 — verify tenant access**
 
 ```
-1. Extract the token from the Authorization header
-        ↓
-2. SHA-256 hash it
-        ↓
-3. Look up that hash in the calling_services table
-   → No match: 401 Invalid bearer token
-        ↓
-4. Check that tenant_dev is in the service's allowed_tenant_ids
-   → Not there: 403 Not authorised for this tenant
-        ↓
-5. Look up tenant_dev in the tenants table
-   → Not found: 403 Tenant not found
-        ↓
-6. Pass the Tenant object to the handler
+X-Tenant-Id: saathi
+                ↓
+    SELECT tenants.*
+    FROM tenants
+    JOIN calling_service_tenants ON tenant_id = tenants.id
+    WHERE calling_service_id = <resolved service id>
+      AND tenants.id = 'saathi'
 ```
 
-If all steps pass, the request continues. If any step fails, the request stops right there.
+If no row matches (tenant doesn't exist, or this service isn't granted access) → `403 Service is not authorised to act on behalf of tenant 'saathi'`.
 
 ---
 
-## Why is the token hashed?
+## Error responses
 
-The raw token is never stored anywhere. Only its SHA-256 hash goes into the database.
-
-This means if the database is ever leaked, attackers get a list of hashes — useless without the original tokens. It's the same reason passwords are stored as hashes.
-
-To rotate a token: generate a new one, hash it, update the `bearer_token_hash` column for that service. Old tokens stop working immediately.
-
----
-
-## Managing calling services
-
-Register a new service:
-
-```bash
-uv run llm-service services add \
-  --name my-service \
-  --token some-secret-token \
-  --tenants tenant_dev,tenant_acme
-```
-
-List all registered services:
-
-```bash
-uv run llm-service services list
-```
-
-There's no `services remove` command yet — to remove a service, delete its row from the `calling_services` table directly in Postgres.
+| Situation | Status | Detail |
+|-----------|--------|--------|
+| Missing or malformed `Authorization` header | 401 | `Missing or malformed Authorization header.` |
+| Token not found in database | 401 | `Invalid bearer token.` |
+| `X-Tenant-Id` header missing | 400 | `Missing X-Tenant-Id header.` |
+| Tenant not found or service not granted access | 403 | `Service is not authorised to act on behalf of tenant '<id>'.` |
 
 ---
 
-## Managing tenants
+## What the handler receives
 
-Tenants are created automatically when you run `keys set` for the first time — the CLI creates the tenant row if it doesn't exist yet.
+After auth passes, the handler receives a `Tenant` ORM object:
 
-To create a tenant without setting a key:
-
-```sql
-INSERT INTO tenants (id, name) VALUES ('tenant_acme', 'Acme Corp');
+```python
+class Tenant(Base):
+    id: str        # e.g. "saathi"
+    name: str      # e.g. "Saathi"
+    created_at: datetime
 ```
 
-Or just run `keys set` and the tenant gets created as a side effect.
+The `tenant.id` is then used throughout the pipeline — to look up the BYOK key, enforce policy, key the cache, and write the ledger row.
+
+---
+
+## Database tables
+
+Three tables implement this model:
+
+**`tenants`** — one row per tenant.
+
+**`calling_services`** — one row per registered backend application. Stores `name` and `bearer_token_hash`. The raw token is never persisted.
+
+**`calling_service_tenants`** — join table. A row here means "this calling service is allowed to act on behalf of this tenant." Cascade-deletes when either side is removed.
+
+---
+
+## Security properties
+
+- **No fallback identity** — if auth fails, the request is rejected hard. There is no guest or default tenant.
+- **No raw token storage** — SHA-256 pre-image resistance means a database dump does not yield live tokens.
+- **Tenant isolation** — a calling service that has access to `tenant_a` cannot access `tenant_b`'s keys, ledger, or policy, even if it knows the tenant ID, unless a `calling_service_tenants` row grants it explicitly.
+
+---
+
+See [Keys & Secrets](keys-cli.md) for how provider API keys are stored for each tenant.

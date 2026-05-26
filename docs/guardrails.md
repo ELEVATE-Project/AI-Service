@@ -536,4 +536,8 @@ src/llm_service/api/rest/chat.py  Steps 6 and 9 — input and output check
 ---
 
 See [Auth & Tenants](auth-and-tenants.md) for how the tenant is resolved before guardrails run.
-See [Keys & Secrets CLI](keys-cli.md) for how tenant BYOK keys are managed (separate from the Llama-Guard service key).
+See [Keys & Secrets](keys-cli.md) for how tenant BYOK keys are managed (separate from the Llama-Guard service key).
+
+---
+
+Next: [Response Cache](cache.md) — how identical requests are served from Redis without hitting a provider.

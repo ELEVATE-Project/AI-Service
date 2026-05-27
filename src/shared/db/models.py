@@ -9,7 +9,7 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
 
-from src.shared.db.enums import Feature, KeyFormat, LedgerStatus, Transport
+from src.shared.db.enums import BatchJobStatus, Feature, KeyFormat, LedgerStatus, Transport
 
 
 class Base(DeclarativeBase):
@@ -220,6 +220,74 @@ class LedgerEntry(Base):
     guardrail_flags: Mapped[Optional[dict[str, Any]]] = mapped_column(
         JSONB, nullable=True,
         comment="Presidio/Llama-Guard events: which rules fired and what was redacted.",
+    )
+
+
+class BatchJob(Base):
+    """One row per async batch request. Tracks lifecycle from pending → submitted → complete/failed."""
+
+    __tablename__ = "batch_jobs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        comment="UUID primary key. Used as custom_id in the upstream batch API request.",
+    )
+    request_id: Mapped[str] = mapped_column(
+        String, nullable=False, unique=True,
+        comment="Gateway-level request ID — same idempotency key as ledger_entries.request_id.",
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        String, ForeignKey("tenants.id"), nullable=False,
+        comment="FK to tenants.id. Used to reload the BYOK key at submission time.",
+    )
+    provider: Mapped[str] = mapped_column(
+        String, nullable=False,
+        comment="Provider that will handle the batch, e.g. openai, anthropic.",
+    )
+    model: Mapped[str] = mapped_column(
+        String, nullable=False,
+        comment="Canonical model ID as sent in the original request.",
+    )
+    normalised_request: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False,
+        comment="NormalisedLLMRequest serialised as JSONB. Reconstructed at submission time.",
+    )
+    upstream_batch_id: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True,
+        comment="Provider batch job ID, e.g. OpenAI batch_xxx or Anthropic msgbatch_xxx.",
+    )
+    upstream_file_id: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True,
+        comment="OpenAI input file ID (file_xxx). Null for Anthropic.",
+    )
+    status: Mapped[BatchJobStatus] = mapped_column(
+        Enum(BatchJobStatus, native_enum=False, values_callable=lambda o: [e.value for e in o]),
+        nullable=False, default=BatchJobStatus.PENDING,
+        comment="Lifecycle state: pending → submitted → complete | failed.",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+        comment="Row creation timestamp (UTC).",
+    )
+    submitted_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="When the job was submitted to the provider batch API (UTC).",
+    )
+    completed_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True,
+        comment="When the result was retrieved from the provider (UTC).",
+    )
+    result: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True,
+        comment="ChatResponse serialised as JSONB. Populated when status=complete.",
+    )
+    submit_attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0,
+        comment="Number of times batch_submit has tried (and failed) to send this job to the provider.",
+    )
+    error_code: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True,
+        comment="Structured error code when status=failed.",
     )
 
 

@@ -1,0 +1,66 @@
+pricing_version: 1
+
+models:
+  openai/gpt-4o:
+    input_rate_per_1k_tokens: 0.0025
+    output_rate_per_1k_tokens: 0.0100
+    cache_write_rate_per_1k_tokens: 0.0031
+    cache_read_rate_per_1k_tokens: 0.00125
+    last_updated: "2026-05-12"
+    source_url: "https://openai.com/api/pricing"
+
+  openai/gpt-4o-mini:
+    input_rate_per_1k_tokens: 0.00015
+    output_rate_per_1k_tokens: 0.0006
+    cache_write_rate_per_1k_tokens: 0.000188
+    cache_read_rate_per_1k_tokens: 0.000075
+    last_updated: "2026-05-12"
+    source_url: "https://openai.com/api/pricing"
+
+  openai/gpt-4.1:
+    input_rate_per_1k_tokens: 0.002
+    output_rate_per_1k_tokens: 0.008
+    cache_write_rate_per_1k_tokens: 0.0025
+    cache_read_rate_per_1k_tokens: 0.001
+    last_updated: "2026-05-12"
+    source_url: "https://openai.com/api/pricing"
+
+  openai/gpt-4.1-mini:
+    input_rate_per_1k_tokens: 0.0004
+    output_rate_per_1k_tokens: 0.0016
+    cache_write_rate_per_1k_tokens: 0.0005
+    cache_read_rate_per_1k_tokens: 0.0002
+    last_updated: "2026-05-12"
+    source_url: "https://openai.com/api/pricing"
+
+  anthropic/claude-opus-4-7:
+    input_rate_per_1k_tokens: 0.015
+    output_rate_per_1k_tokens: 0.075
+    cache_write_rate_per_1k_tokens: 0.01875
+    cache_read_rate_per_1k_tokens: 0.0015
+    last_updated: "2026-05-12"
+    source_url: "https://www.anthropic.com/pricing"
+
+  anthropic/claude-sonnet-4-6:
+    input_rate_per_1k_tokens: 0.003
+    output_rate_per_1k_tokens: 0.015
+    cache_write_rate_per_1k_tokens: 0.00375
+    cache_read_rate_per_1k_tokens: 0.0003
+    last_updated: "2026-05-12"
+    source_url: "https://www.anthropic.com/pricing"
+
+  anthropic/claude-haiku-4-5:
+    input_rate_per_1k_tokens: 0.0008
+    output_rate_per_1k_tokens: 0.004
+    cache_write_rate_per_1k_tokens: 0.001
+    cache_read_rate_per_1k_tokens: 0.0001
+    last_updated: "2026-05-12"
+    source_url: "https://www.anthropic.com/pricing"
+
+  bedrock/meta.llama3-3-70b-instruct-v1:0:
+    input_rate_per_1k_tokens: 0.00072
+    output_rate_per_1k_tokens: 0.00072
+    cache_write_rate_per_1k_tokens: 0.0
+    cache_read_rate_per_1k_tokens: 0.0
+    last_updated: "2026-05-12"
+    source_url: "https://aws.amazon.com/bedrock/pricing/"

@@ -35,6 +35,15 @@ class LedgerStatus(str, Enum):
     PARTIAL_RESPONSE = "partial_response"
 
 
+class BatchJobStatus(str, Enum):
+    """Lifecycle state of an async batch job submitted to a provider batch API."""
+
+    PENDING = "pending"
+    SUBMITTED = "submitted"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
 class SecretBackendType(str, Enum):
     """Which secret store implementation to use for the entire deployment."""
 

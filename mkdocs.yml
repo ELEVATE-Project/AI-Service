@@ -15,6 +15,8 @@ theme:
 nav:
   - Home: index.md
 
+  - Architecture: architecture.md
+
   - Getting Started:
       - Local Setup: local-setup.md
 
@@ -23,5 +25,15 @@ nav:
 
   - Concepts:
       - Auth & Tenants: auth-and-tenants.md
-      - Keys & Secrets CLI: keys-cli.md
+      - Keys & Secrets: keys-cli.md
+      - Policy Engine: policy.md
+      - Guardrails: guardrails.md
+      - Response Cache: cache.md
       - Database Models: models.md
+
+  - Providers:
+      - Provider Layer: providers.md
+      - Adding a Provider: adding-a-provider.md
+
+  - Batch API:
+      - Batch API: batch-api.md

@@ -1,175 +1,122 @@
-# Keys CLI
+# Keys & Secrets
 
-The `llm-service` CLI manages two things: encrypted provider keys (BYOK) and calling service registrations. No raw keys are ever written to files or environment variables.
+The gateway uses BYOK (Bring Your Own Key) — every upstream LLM call uses the tenant's own API key, never a shared platform key. This page explains how those keys are stored and how to manage them.
 
 ---
 
 ## How keys are stored
 
-When you store a key like `sk-abc123`, here's what actually happens:
+When you store a key like `sk-ant-api03-...`, here's what actually happens:
 
 ```
-sk-abc123
-    ↓  JSON serialise
-{"api_key": "sk-abc123"}
+sk-ant-api03-...
+    ↓  JSON serialise into typed payload
+{"api_key": "sk-ant-api03-..."}
     ↓  Fernet encrypt (using master key from OS keyring)
 gAAAAABq...  (encrypted blob)
     ↓  saved to tenant_keys table in Postgres
 ```
 
-The master key that locks everything lives in your OS keyring (macOS Keychain on Mac, Secret Service on Linux). It never touches the database or any file. Production deployments swap the keyring for HashiCorp Vault or AWS Secrets Manager — the rest of the code stays the same.
+The master key lives in your OS keyring (macOS Keychain on Mac, Secret Service on Linux). It never touches the database or any file. Production deployments swap the keyring for HashiCorp Vault or AWS Secrets Manager — the application code is identical.
 
 ---
 
-## Keys commands
+## The setup script
 
-### `keys init`
-
-Generates the master encryption key and saves it in the OS keyring. Run once on first setup.
+`scripts/add_tenant_key.py` handles everything interactively: creating tenants, registering calling services, and storing encrypted provider keys.
 
 ```bash
-uv run llm-service keys init
+uv run python scripts/add_tenant_key.py
 ```
 
-Running it again when a key already exists does nothing — it tells you one exists and exits.
+It reads `DB_URL` from your `.env` and uses the master key already in your OS keyring (created during local setup).
 
 ---
 
-### `keys set`
+## Key formats
 
-Encrypts and stores a provider key for a tenant. Creates the tenant row if it doesn't exist.
+Three formats are supported, selected automatically per provider:
 
-```bash
-uv run llm-service keys set \
-  --tenant <tenant-id> \
-  --provider <provider> \
-  --key-format <format> \
-  --payload '<json>'
-```
+| Format | Providers | Payload shape |
+|--------|-----------|---------------|
+| `api_key` | OpenAI, Anthropic, Groq, custom endpoints | `{"api_key": "sk-..."}` |
+| `aws_credentials` | Bedrock | `{"access_key_id": "...", "secret_access_key": "...", "region": "us-east-1"}` |
+| `endpoint_pair` | Self-hosted / HuggingFace endpoints | `{"endpoint_url": "https://...", "token": "hf_..."}` |
 
-**Options:**
-
-| Option | Required | What to put |
-|--------|----------|-------------|
-| `--tenant` | Yes | Tenant ID, e.g. `tenant_acme` |
-| `--provider` | Yes | Provider name: `openai`, `anthropic`, `bedrock`, `hf_endpoint`, `hf_self_hosted` |
-| `--key-format` | Yes | One of: `api_key`, `aws_credentials`, `endpoint_pair` |
-| `--payload` | Yes | JSON string with the credentials |
-
-**Payload shapes by format:**
-
-`api_key` — for OpenAI, Anthropic, most providers:
-```bash
---key-format api_key \
---payload '{"api_key": "sk-abc123"}'
-```
-
-`aws_credentials` — for Bedrock:
-```bash
---key-format aws_credentials \
---payload '{"access_key_id": "AKIA...", "secret_access_key": "xyz...", "region": "us-east-1"}'
-```
-
-`endpoint_pair` — for HuggingFace Endpoints or self-hosted:
-```bash
---key-format endpoint_pair \
---payload '{"endpoint_url": "https://your-endpoint.huggingface.cloud", "token": "hf_abc..."}'
-```
-
-Running `keys set` a second time for the same `(tenant, provider)` pair updates the existing key — it won't create a duplicate.
+The format is inferred from the provider name. For any provider not in the built-in map, the script asks you to pick one.
 
 ---
 
-### `keys list`
-
-Shows which providers have keys registered for a tenant. Values are masked.
-
-```bash
-uv run llm-service keys list --tenant tenant_dev
-```
-
-Example output:
+## Adding an Anthropic key
 
 ```
-  provider=openai  key_format=api_key  payload=<masked>
-  provider=anthropic  key_format=api_key  payload=<masked>
+Provider: anthropic
+  API key: sk-ant-api03-...your-key...
+
+✓ Key (anthropic / api_key) written.
 ```
 
 ---
 
-## Services commands
-
-### `services add`
-
-Registers a calling service with a bearer token. The token is hashed before storing — save it somewhere safe, you can't retrieve it later.
-
-```bash
-uv run llm-service services add \
-  --name <name> \
-  --token <token> \
-  --tenants <tenant1,tenant2,...>
-```
-
-**Options:**
-
-| Option | Required | What to put |
-|--------|----------|-------------|
-| `--name` | Yes | A label for this service, e.g. `taxbot-backend` |
-| `--token` | Yes | The bearer token this service will use in API requests |
-| `--tenants` | Yes | Comma-separated list of tenant IDs this service can act on behalf of |
-
-Example:
-
-```bash
-uv run llm-service services add \
-  --name taxbot-backend \
-  --token my-secret-token-abc \
-  --tenants tenant_acme,tenant_globex
-```
-
-After running, use this token in API requests:
+## Adding a Bedrock key
 
 ```
-Authorization: Bearer my-secret-token-abc
+Provider: bedrock
+  AWS Access Key ID: <your-aws-access-key-id>
+  AWS Secret Access Key: <your-aws-secret-access-key>
+  AWS Region [us-east-1]: us-west-2
+  AWS Session Token (press Enter to skip): [Enter]
+  AWS Role Name (press Enter to skip): [Enter]
+  S3 bucket name for batch inference (press Enter to skip): [Enter]
+  IAM Role ARN for batch inference (press Enter to skip): [Enter]
+
+✓ Key (bedrock / aws_credentials) written.
+```
+
+You can skip all the optional fields (session token, role name, S3 bucket, IAM role ARN) for regular chat and streaming. They are only needed for [Batch API](batch-api.md) requests.
+
+---
+
+## Adding an OpenAI key
+
+```
+Provider: openai
+  API key: sk-proj-...your-key...
+
+✓ Key (openai / api_key) written.
 ```
 
 ---
 
-### `services list`
+## Adding multiple providers for one tenant
 
-Lists all registered calling services. Tokens are masked.
-
-```bash
-uv run llm-service services list
-```
-
-Example output:
-
-```
-  name=taxbot-backend  allowed_tenants=['tenant_acme', 'tenant_globex']  token=<masked>
-  name=internal-tool  allowed_tenants=['tenant_dev']  token=<masked>
-```
+Run the script once. After the first key is written, answer `y` to "Add another key for this tenant?" to add a second provider. The script loops until you answer `n`.
 
 ---
 
-## Full command map
+## Key rotation
 
-```
-llm-service
-├── keys
-│   ├── init       Generate master encryption key (run once)
-│   ├── set        Store a provider key for a tenant
-│   └── list       List keys registered for a tenant
-└── services
-    ├── add        Register a calling service + token
-    └── list       List all registered services
-```
+Run the script again for the same tenant and provider. The upsert (`ON CONFLICT ON CONSTRAINT uq_tenant_provider DO UPDATE`) replaces the existing encrypted payload. The old key stops being used immediately on the next request.
 
-Get help on any command:
+---
 
-```bash
-uv run llm-service --help
-uv run llm-service keys --help
-uv run llm-service keys set --help
-uv run llm-service services --help
-```
+## How keys are loaded at request time
+
+The secret backend (`src/shared/secrets/postgres_encrypted.py`) runs this on every request:
+
+1. Query `tenant_keys` for `(tenant_id, provider)`.
+2. If no row → raise `MissingTenantKeyError` → handler returns `422 missing_tenant_key`.
+3. Decrypt the payload with Fernet using the master key from the OS keyring.
+4. Return `TenantKeyPayload(key_format, data)` to the transport adapter.
+
+The key is decrypted fresh per call. It is never cached in memory between requests.
+
+---
+
+## One key per (tenant, provider)
+
+The `tenant_keys` table has a unique constraint on `(tenant_id, provider)`. Each tenant has at most one key per provider at a time. Storing a new key for the same provider replaces the old one.
+
+---
+
+See [Policy Engine](policy.md) for how per-tenant usage limits are enforced on top of BYOK.

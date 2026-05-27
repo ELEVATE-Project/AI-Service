@@ -29,6 +29,7 @@ from src.shared.db.models import BatchJob, Tenant
 from src.shared.guardrails.base import GuardrailsChecker
 from src.shared.policy.checker import PolicyChecker, PolicyContext, PolicyExceededError
 from src.shared.queue.tasks import BATCH_ELIGIBLE_PROVIDERS
+from src.shared.ledger.pricing import UnknownModelError, pricing_table
 from src.shared.schemas.envelope import CostBlock, GuardrailsBlock, LatencyBlock, PolicyBlock
 from src.shared.secrets.backend import MissingTenantKeyError, SecretBackend
 
@@ -37,6 +38,20 @@ router = APIRouter(prefix="/v1")
 
 def _new_request_id() -> str:
     return f"req_{uuid.uuid4().hex[:24]}"
+
+
+def _compute_cost(provider: str, model: str, usage: "UsageBlock") -> CostBlock:
+    try:
+        return pricing_table.compute_cost(
+            provider=provider,
+            model=model,
+            tokens_in=usage.input_tokens,
+            tokens_out=usage.output_tokens,
+            cache_write_tokens=usage.input_tokens_cache_write or 0,
+            cache_read_tokens=usage.input_tokens_cache_read or 0,
+        )
+    except UnknownModelError:
+        return CostBlock()
 
 
 @router.post("/chat", response_model=ChatResponse, responses={202: {"model": BatchAcceptedResponse}})
@@ -115,6 +130,7 @@ async def chat(
         output_flags=[],
         redactions_applied=input_result.redactions,
     )
+    response.cost = _compute_cost(normalised.provider, normalised.model, response.usage)
     # TODO: Step 10 — ledger write
     await cache.set(cache_key, response, ttl_seconds=settings.cache_ttl_seconds)
     return response
@@ -221,11 +237,12 @@ async def chat_stream(
         upstream_ms = int((time.monotonic() - upstream_start) * 1000)
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
+        computed_cost = _compute_cost(normalised.provider, normalised.model, final_usage)
         finish = FinishData(
             id=request_id,
             finish_reason=final_finish_reason,
             usage=final_usage,
-            cost=CostBlock(),
+            cost=computed_cost,
             latency_ms=LatencyBlock(
                 total=elapsed_ms,
                 upstream=upstream_ms,
@@ -263,7 +280,7 @@ async def chat_stream(
                 finish_reason=final_finish_reason,
             )],
             usage=final_usage,
-            cost=CostBlock(),
+            cost=computed_cost,
             latency_ms=finish.latency_ms,
             cache=CacheBlock(our_cache_hit=False, upstream_prompt_cache_hit=upstream_cache_hit),
             guardrails=finish.guardrails,

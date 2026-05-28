@@ -7,6 +7,7 @@ from src.llm_service.providers import registry
 from src.shared.config import settings
 from src.shared.db.enums import BatchJobStatus
 from src.shared.db.models import BatchJob
+from src.shared.secrets.backend import MissingTenantKeyError
 from src.shared.secrets.postgres_encrypted import PostgresEncryptedBackend
 
 BATCH_ELIGIBLE_PROVIDERS: frozenset[str] = frozenset({"openai", "azure", "anthropic", "bedrock", "vertex_ai"})
@@ -29,7 +30,12 @@ async def batch_submit(ctx: dict) -> None:
                 transport = registry.resolve(provider, jobs[0].model, "batch")
                 await transport.batch_submit(jobs, key)
                 await db.commit()
-            except Exception as error:
+            except MissingTenantKeyError:
+                for job in jobs:
+                    job.status = BatchJobStatus.FAILED
+                    job.error_code = "missing_tenant_key"
+                await db.commit()
+            except Exception:
                 for job in jobs:
                     job.submit_attempts += 1
                     if job.submit_attempts >= max_attempts:
@@ -53,6 +59,11 @@ async def batch_poll(ctx: dict) -> None:
                 key = await PostgresEncryptedBackend(db).get_key(tenant_id, provider)
                 transport = registry.resolve(provider, jobs[0].model, "batch")
                 await transport.batch_poll(upstream_batch_id, jobs, key)
+                await db.commit()
+            except MissingTenantKeyError:
+                for job in jobs:
+                    job.status = BatchJobStatus.FAILED
+                    job.error_code = "missing_tenant_key"
                 await db.commit()
             except Exception as error:
                 print(f"batch_poll: failed for ({tenant_id}, {provider}, {upstream_batch_id}): {error}")

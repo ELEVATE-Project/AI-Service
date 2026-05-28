@@ -177,6 +177,7 @@ async def chat_stream(
             cache=CacheBlock(our_cache_hit=True),
             guardrails=cached.guardrails,
             policy=cached.policy,
+            citations=cached.choices[0].message.citations,
         )
 
         async def _cached_stream() -> AsyncIterator[str]:
@@ -276,6 +277,7 @@ async def chat_stream(
                     role="assistant",
                     content=accumulated_content or None,
                     tool_calls=tool_calls,
+                    citations=final_citations,
                 ),
                 finish_reason=final_finish_reason,
             )],

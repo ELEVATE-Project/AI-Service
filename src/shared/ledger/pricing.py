@@ -28,6 +28,8 @@ class PricingTable:
     def compute_cost(self, provider: str, model: str, tokens_in: int, tokens_out: int, cache_write_tokens: int = 0,
         cache_read_tokens: int = 0) -> CostBlock:
 
+        if any(v < 0 for v in (tokens_in, tokens_out, cache_write_tokens, cache_read_tokens)):
+            raise ValueError("token counts must be non-negative")
         key = f"{provider}/{model}"
         rates = self._models.get(key)
         if rates is None:

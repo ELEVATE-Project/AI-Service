@@ -114,10 +114,10 @@ def main() -> None:
         print(f"ERROR: DEV_KEY_FORMAT={dev_key_format_raw!r} is not valid. Choose from: {valid}", file=sys.stderr)
         sys.exit(1)
 
-    if dev_key_format == KeyFormat.AWS_CREDENTIALS:
+    if dev_key_format is not KeyFormat.API_KEY:
         print(
-            "ERROR: DEV_KEY_FORMAT=aws_credentials requires access_key_id, secret_access_key, and region.\n"
-            "       Extend this script manually for Bedrock credentials.",
+            f"ERROR: DEV_KEY_FORMAT={dev_key_format.value} is not supported by this script.\n"
+            "       This helper currently only writes api_key payloads.",
             file=sys.stderr,
         )
         sys.exit(1)

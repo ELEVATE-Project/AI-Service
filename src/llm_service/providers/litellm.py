@@ -7,6 +7,7 @@ import random
 import time
 from collections.abc import AsyncIterator
 from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import Any, Optional
 
 import httpx
@@ -53,7 +54,13 @@ def _retry_delay(error: Exception, attempt: int) -> float:
             if headers is not None:
                 retry_after = headers.get("retry-after")
                 if retry_after is not None:
-                    return float(retry_after)
+                    try:
+                        return max(0.0, float(retry_after))
+                    except (TypeError, ValueError):
+                        dt = parsedate_to_datetime(retry_after)
+                        if dt.tzinfo is None:
+                            dt = dt.replace(tzinfo=timezone.utc)
+                        return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
     return settings.llm_retry_backoff_base_s * (2 ** attempt) + random.uniform(0, 0.5)
 
 

@@ -73,12 +73,16 @@ def _parse_response(response_text: str) -> GuardrailsResult:
     first = lines[0].strip().lower() if lines else ""
     if first == "safe" or not first:
         return GuardrailsResult()
+    if not first.startswith("unsafe"):
+        return GuardrailsResult(blocked=True, flags=["safety.classifier_unparseable"])
     raw_codes = lines[1].split(",") if len(lines) > 1 else []
     flags = [
         f"safety.{_CATEGORY_MAP.get(code.strip(), code.strip().lower())}"
         for code in raw_codes if code.strip()
     ]
-    return GuardrailsResult(blocked=bool(flags), flags=flags)
+    if not flags:
+        flags = ["safety.unknown_unsafe"]
+    return GuardrailsResult(blocked=True, flags=flags)
 
 
 class LlamaGuardChecker(GuardrailsChecker):
@@ -86,6 +90,8 @@ class LlamaGuardChecker(GuardrailsChecker):
 
     def __init__(self, model: str, api_key: Optional[str], api_base: Optional[str]) -> None:
         import litellm  # noqa: PLC0415
+        if not api_key and not api_base:
+            raise ValueError("LlamaGuardChecker requires api_key (hosted) or api_base (self-hosted)")
         self._litellm = litellm
         self._model = model
         self._api_key = api_key or None

@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Optional
 
-from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, CheckConstraint, DateTime, Enum, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
@@ -116,6 +117,12 @@ class LedgerEntry(Base):
     """One row per upstream LLM call. Stores both our computed cost and the raw provider usage for audit."""
 
     __tablename__ = "ledger_entries"
+    __table_args__ = (
+        CheckConstraint(
+            "(status != 'success') OR (provider_reported_usage IS NOT NULL)",
+            name="ck_ledger_success_has_provider_usage",
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
@@ -176,8 +183,8 @@ class LedgerEntry(Base):
         Boolean, nullable=True,
         comment="True if any input tokens were served from the provider-side prompt cache.",
     )
-    our_cost_usd: Mapped[float] = mapped_column(
-        Float, nullable=False,
+    our_cost_usd: Mapped[Decimal] = mapped_column(
+        Numeric(precision=18, scale=10), nullable=False,
         comment="Cost computed from pricing/models.yaml at request time.",
     )
     pricing_version: Mapped[int] = mapped_column(
@@ -188,8 +195,8 @@ class LedgerEntry(Base):
         JSONB, nullable=True,
         comment="Raw usage block from the provider response, stored verbatim for billing audit.",
     )
-    provider_reported_cost_usd: Mapped[Optional[float]] = mapped_column(
-        Float, nullable=True,
+    provider_reported_cost_usd: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(precision=18, scale=10), nullable=True,
         comment="Cost figure reported by the provider where available, e.g. Bedrock.",
     )
     latency_ms: Mapped[int] = mapped_column(
@@ -312,8 +319,8 @@ class Policy(Base):
         Integer, nullable=True,
         comment="Maximum requests per minute. Null means no rate limit.",
     )
-    budget_usd_monthly: Mapped[Optional[float]] = mapped_column(
-        Float, nullable=True,
+    budget_usd_monthly: Mapped[Optional[Decimal]] = mapped_column(
+        Numeric(precision=12, scale=2), nullable=True,
         comment="Monthly cost ceiling in USD. Null means no budget limit.",
     )
     allowed_models: Mapped[Optional[list[str]]] = mapped_column(

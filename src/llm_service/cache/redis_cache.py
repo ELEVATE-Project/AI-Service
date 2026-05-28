@@ -42,6 +42,5 @@ class RedisCache(CacheBackend):
     async def set(self, key: str, response: ChatResponse, ttl_seconds: int) -> None:
         try:
             await self._client.set(key, response.model_dump_json(), ex=ttl_seconds)
-            await self._client.delete(f"lock:{key}")
         except Exception:
             pass

@@ -51,14 +51,15 @@ Returns the full response in one go.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `provider` | `string` | Yes | `anthropic`, `openai`, `bedrock`, `groq`, `custom_endpoint` |
-| `model` | `string` | Yes | Model ID as the provider uses it, e.g. `claude-sonnet-4-5` |
+| `provider` | `string` | Yes | `anthropic`, `openai`, `bedrock`, `groq`, `openrouter`, `custom_endpoint` |
+| `model` | `string` | Yes | Model ID as the provider uses it, e.g. `claude-sonnet-4-5`. For `openrouter`, use the OpenRouter slug, e.g. `openai/gpt-4o` or `anthropic/claude-3.5-sonnet`. |
 | `messages` | `Message[]` | Yes | Conversation history. See message fields below. |
 | `tools` | `Tool[]` | No | Function definitions the model can call |
 | `tool_choice` | `string \| object` | No | `"auto"`, `"none"`, `"required"`, or `{"type":"function","function":{"name":"..."}}` |
 | `params` | `ChatParams` | No | Inference parameters. All fields optional. |
 | `cache_policy` | `string` | No | `"auto"` (default), `"explicit"`, or `"off"` — controls prompt cache hint injection |
 | `metadata` | `object` | No | Free-form. Pass `{"batch": true}` to submit asynchronously. Not sent upstream. |
+| `provider_options` | `object` | No | Provider-specific passthrough. Consumed only for `provider: "openrouter"` — keys: `provider` (routing prefs), `models` (fallback list), `referer` / `title` (app attribution). See [Provider Layer → OpenRouter](providers.md#openrouter). |
 
 **Message fields**
 

@@ -22,6 +22,10 @@ class Settings(BaseSettings):
     llm_retry_max_attempts: int
     llm_retry_backoff_base_s: float
     batch_max_submit_attempts: int
+    # OpenRouter app-attribution defaults (sent as HTTP-Referer / X-Title).
+    # Optional — per-request provider_options can override these.
+    openrouter_app_url: Optional[str] = None
+    openrouter_app_title: Optional[str] = None
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

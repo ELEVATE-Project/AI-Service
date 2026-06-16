@@ -30,6 +30,7 @@ _PROVIDER_FORMAT: dict[str, str] = {
     "openai":          "api_key",
     "anthropic":       "api_key",
     "groq":            "api_key",
+    "openrouter":      "api_key",
     "bedrock":         "aws_credentials",
     "custom_endpoint": "endpoint_pair",
 }
@@ -279,7 +280,7 @@ async def _run(db_url: str) -> None:
             add_key = _ask_yn(f"\nAdd a provider key for '{tenant_id}'?")
             while add_key:
                 print()
-                provider = _ask("  Provider (openai / azure / anthropic / bedrock / vertex_ai / groq / custom_endpoint)")
+                provider = _ask("  Provider (openai / azure / anthropic / bedrock / vertex_ai / groq / openrouter / custom_endpoint)")
                 key_format, data = _collect_key_data(provider)
                 encrypted = fernet.encrypt(json.dumps(data).encode()).decode()
                 await conn.execute(

@@ -76,9 +76,15 @@ LLM_RETRY_BACKOFF_BASE_S=2.0
 
 # Batch
 BATCH_MAX_SUBMIT_ATTEMPTS=3
+
+# OpenRouter app attribution (optional) — sent as HTTP-Referer / X-Title so
+# usage is credited to your app in the OpenRouter dashboard. Per-request
+# provider_options.referer / provider_options.title override these.
+OPENROUTER_APP_URL=
+OPENROUTER_APP_TITLE=
 ```
 
-Every variable must be present — the app fails fast on any missing config.
+Every variable must be present — the app fails fast on any missing config. The two `OPENROUTER_*` variables are optional and may be omitted entirely.
 
 ---
 

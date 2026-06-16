@@ -107,6 +107,43 @@ raw = await litellm.acompletion(
 
 ---
 
+## OpenRouter
+
+OpenRouter gives a tenant access to OpenRouter's full model catalog through a single key. It is **not a separate transport** — it routes through `LiteLLMTransport` like any other LiteLLM-supported provider.
+
+**Request shape:** `provider: "openrouter"`, `model: "<vendor>/<model>"` (the OpenRouter slug), e.g. `openai/gpt-4o`, `anthropic/claude-3.5-sonnet`. The transport builds the LiteLLM model string `openrouter/<vendor>/<model>`.
+
+**Key:** `api_key` format — `{"api_key": "sk-or-..."}`. Stored per tenant like every other BYOK key; no migration required.
+
+**Cost:** OpenRouter reports the real cost of each call, so the gateway records it into `cost.provider_reported_usd` (from LiteLLM's `_hidden_params["response_cost"]` or OpenRouter's `usage.cost`) rather than relying on `pricing/models.yaml`. This is the authoritative figure; `computed_usd` stays 0 unless the model also has a YAML entry.
+
+> **Streaming caveat:** LiteLLM does not reliably preserve OpenRouter's `usage.cost` on streamed responses. When the reported cost is missing on a stream, `provider_reported_usd` is `null` and the gateway falls back to YAML pricing (0 if the model is unlisted).
+
+**OpenRouter-specific knobs** — passed via the optional `provider_options` field on the request and forwarded only when `provider == "openrouter"`:
+
+| `provider_options` key | Forwarded as | Purpose |
+|---|---|---|
+| `provider` | `extra_body.provider` | OpenRouter routing prefs (`order`, `allow_fallbacks`, `data_collection`, `require_parameters`) |
+| `models` | `extra_body.models` | Model fallback list |
+| `referer` / `title` | `HTTP-Referer` / `X-Title` headers | App attribution (defaults from `OPENROUTER_APP_URL` / `OPENROUTER_APP_TITLE`) |
+
+```json
+{
+  "provider": "openrouter",
+  "model": "anthropic/claude-3.5-sonnet",
+  "messages": [{"role": "user", "content": "hi"}],
+  "provider_options": {
+    "provider": {"order": ["Anthropic"], "allow_fallbacks": false},
+    "models": ["openai/gpt-4o"],
+    "title": "ai-service"
+  }
+}
+```
+
+**Batch:** OpenRouter has no batch API. It is not in `BATCH_ELIGIBLE_PROVIDERS`, so a `metadata.batch = true` request for `openrouter` returns `422 provider_not_batch_eligible`.
+
+---
+
 ## AnthropicTransport
 
 `src/llm_service/providers/anthropic.py` — direct Anthropic SDK, used only for batch operations.
@@ -135,7 +172,7 @@ Each transport reads `key.key_format` to know how to extract credentials:
 
 | `key_format` | Used by | Fields |
 |---|---|---|
-| `api_key` | LiteLLM (Anthropic, OpenAI, Groq), AnthropicTransport | `api_key` |
+| `api_key` | LiteLLM (Anthropic, OpenAI, Groq, OpenRouter), AnthropicTransport | `api_key` |
 | `aws_credentials` | LiteLLM (Bedrock), BedrockTransport | `access_key_id`, `secret_access_key`, `region` |
 | `endpoint_pair` | LiteLLM (custom endpoints) | `endpoint_url`, `token` |
 

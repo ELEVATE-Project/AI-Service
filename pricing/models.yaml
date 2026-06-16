@@ -1,5 +1,10 @@
 pricing_version: 1
 
+# Note: OpenRouter (provider="openrouter") models do not need entries here.
+# OpenRouter reports the real cost per call, which the gateway records into
+# cost.provider_reported_usd. Add openrouter/<vendor>/<model> entries only if
+# you want a YAML fallback for streamed responses (where LiteLLM may drop the
+# reported cost).
 models:
   openai/gpt-4.1-mini:
     input_rate_per_1k_tokens: 0.0004

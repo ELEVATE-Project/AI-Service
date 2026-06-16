@@ -119,6 +119,29 @@ def _build_fallbacks(
     ]
 
 
+def _extract_response_cost(raw: Any) -> Optional[float]:
+    """Best-effort provider-reported response cost in USD.
+
+    LiteLLM populates ``_hidden_params['response_cost']`` for providers that
+    report cost (OpenRouter among them); OpenRouter also returns ``usage.cost``.
+    Returns None when neither is available (caller falls back to YAML pricing).
+    """
+    hidden = getattr(raw, "_hidden_params", None)
+    if isinstance(hidden, dict) and hidden.get("response_cost") is not None:
+        try:
+            return float(hidden["response_cost"])
+        except (TypeError, ValueError):
+            pass
+    usage = getattr(raw, "usage", None)
+    cost = getattr(usage, "cost", None) if usage is not None else None
+    if cost is not None:
+        try:
+            return float(cost)
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
 class LiteLLMTransport(BaseLLMProvider):
     """Routes any provider through the LiteLLM in-process SDK."""
 
@@ -173,6 +196,38 @@ class LiteLLMTransport(BaseLLMProvider):
             )
         if params.web_search_options is not None:
             kwargs["web_search_options"] = params.web_search_options.model_dump(exclude_none=True)
+        return kwargs
+
+    def _openrouter_kwargs(self, request: NormalisedLLMRequest) -> dict[str, Any]:
+        """Map provider_options to LiteLLM extra_body / extra_headers for OpenRouter.
+
+        OpenRouter reads routing prefs (``provider``) and a fallback list
+        (``models``) from the request body, and app attribution from the
+        HTTP-Referer / X-Title headers. Returns {} for any other provider.
+        """
+        if request.provider != "openrouter":
+            return {}
+        options = request.provider_options or {}
+
+        extra_body: dict[str, Any] = {}
+        if options.get("provider") is not None:
+            extra_body["provider"] = options["provider"]
+        if options.get("models") is not None:
+            extra_body["models"] = options["models"]
+
+        referer = options.get("referer") or settings.openrouter_app_url
+        title = options.get("title") or settings.openrouter_app_title
+        extra_headers: dict[str, str] = {}
+        if referer:
+            extra_headers["HTTP-Referer"] = referer
+        if title:
+            extra_headers["X-Title"] = title
+
+        kwargs: dict[str, Any] = {}
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+        if extra_headers:
+            kwargs["extra_headers"] = extra_headers
         return kwargs
 
     def _serialize_messages(
@@ -276,12 +331,15 @@ class LiteLLMTransport(BaseLLMProvider):
         if fallbacks:
             fallback_kwargs["fallbacks"] = fallbacks
 
+        openrouter_kwargs = self._openrouter_kwargs(request)
+
         raw = None
         for attempt in range(settings.llm_retry_max_attempts):
             try:
                 raw = await litellm.acompletion(
                     model=model_str, messages=messages, drop_params=True,
-                    **tool_kwargs, **credential_kwargs, **param_kwargs, **fallback_kwargs,
+                    **tool_kwargs, **credential_kwargs, **param_kwargs,
+                    **fallback_kwargs, **openrouter_kwargs,
                 )
                 break
             except Exception as error:
@@ -292,6 +350,7 @@ class LiteLLMTransport(BaseLLMProvider):
 
         usage = self._extract_usage(raw)
         choices = self._map_choices(raw)
+        reported_cost = _extract_response_cost(raw)
 
         return ChatResponse(
             id="",
@@ -303,7 +362,7 @@ class LiteLLMTransport(BaseLLMProvider):
             region=self._regions[0] if self._regions else None,
             choices=choices,
             usage=usage,
-            cost=CostBlock(),
+            cost=CostBlock(provider_reported_usd=reported_cost),
             latency_ms=LatencyBlock(),
             cache=CacheBlock(
                 our_cache_hit=False,
@@ -339,6 +398,8 @@ class LiteLLMTransport(BaseLLMProvider):
         if fallbacks:
             fallback_kwargs["fallbacks"] = fallbacks
 
+        openrouter_kwargs = self._openrouter_kwargs(request)
+
         # Retry connection setup before any tokens are sent to the caller.
         response_stream = None
         for attempt in range(settings.llm_retry_max_attempts):
@@ -353,6 +414,7 @@ class LiteLLMTransport(BaseLLMProvider):
                     **credential_kwargs,
                     **param_kwargs,
                     **fallback_kwargs,
+                    **openrouter_kwargs,
                 )
                 break
             except Exception as error:
@@ -372,6 +434,7 @@ class LiteLLMTransport(BaseLLMProvider):
         final_usage = UsageBlock()
         final_finish_reason = "stop"
         final_citations: Optional[list[Any]] = None
+        reported_cost: Optional[float] = None
         all_chunks: list[Any] = []
 
         # Once iteration starts we cannot retry — emit an error event on failure.
@@ -382,6 +445,7 @@ class LiteLLMTransport(BaseLLMProvider):
                 if not chunk.choices:
                     if getattr(chunk, "usage", None):
                         final_usage = self._extract_usage(chunk)
+                        reported_cost = _extract_response_cost(chunk) or reported_cost
                     continue
 
                 choice = chunk.choices[0]
@@ -414,6 +478,7 @@ class LiteLLMTransport(BaseLLMProvider):
 
                 if getattr(chunk, "usage", None):
                     final_usage = self._extract_usage(chunk)
+                    reported_cost = _extract_response_cost(chunk) or reported_cost
 
         except Exception as stream_error:
             yield StreamEvent(
@@ -437,6 +502,8 @@ class LiteLLMTransport(BaseLLMProvider):
                         if citations and not isinstance(citations, list):
                             citations = [citations]
                         final_citations = citations or None
+                    if reported_cost is None:
+                        reported_cost = _extract_response_cost(assembled)
             except Exception:
                 pass
 
@@ -446,6 +513,7 @@ class LiteLLMTransport(BaseLLMProvider):
                 finish_reason=final_finish_reason,
                 usage=final_usage,
                 citations=final_citations,
+                provider_reported_usd=reported_cost,
             ),
         )
 

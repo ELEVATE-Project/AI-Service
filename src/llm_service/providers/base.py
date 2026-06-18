@@ -30,6 +30,7 @@ class TransportFinishData:
     finish_reason: str
     usage: UsageBlock
     citations: Optional[list[Any]] = None
+    provider_reported_usd: Optional[float] = None
 
 
 @dataclass

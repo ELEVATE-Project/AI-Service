@@ -64,6 +64,11 @@ class ChatRequest(BaseModel):
     params: Optional[ChatParams] = None
     cache_policy: Literal["auto", "explicit", "off"] = "auto"
     metadata: Optional[dict[str, Any]] = None
+    # Provider-specific passthrough. Currently consumed only for provider="openrouter":
+    #   provider — OpenRouter routing prefs (order, allow_fallbacks, data_collection, ...)
+    #   models   — OpenRouter model fallback list
+    #   referer / title — per-request app-attribution overrides
+    provider_options: Optional[dict[str, Any]] = None
 
 
 class NormalisedLLMRequest(BaseModel):
@@ -74,6 +79,7 @@ class NormalisedLLMRequest(BaseModel):
     tool_choice: Optional[Any] = None
     params: Optional[ChatParams] = None
     metadata: Optional[dict[str, Any]] = None
+    provider_options: Optional[dict[str, Any]] = None
 
 
 class ChoiceMessage(BaseModel):

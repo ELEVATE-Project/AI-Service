@@ -40,9 +40,17 @@ def _new_request_id() -> str:
     return f"req_{uuid.uuid4().hex[:24]}"
 
 
-def _compute_cost(provider: str, model: str, usage: "UsageBlock") -> CostBlock:
+def _compute_cost(
+    provider: str, model: str, usage: "UsageBlock",
+    provider_reported_usd: Optional[float] = None,
+) -> CostBlock:
+    """Build the cost envelope: YAML-computed cost plus any provider-reported cost.
+
+    For providers that report cost (e.g. OpenRouter), provider_reported_usd is the
+    authoritative figure; computed_usd is 0 when the model has no YAML pricing entry.
+    """
     try:
-        return pricing_table.compute_cost(
+        cost = pricing_table.compute_cost(
             provider=provider,
             model=model,
             tokens_in=usage.input_tokens,
@@ -51,7 +59,10 @@ def _compute_cost(provider: str, model: str, usage: "UsageBlock") -> CostBlock:
             cache_read_tokens=usage.input_tokens_cache_read or 0,
         )
     except UnknownModelError:
-        return CostBlock()
+        cost = CostBlock()
+    if provider_reported_usd is not None:
+        cost = cost.model_copy(update={"provider_reported_usd": provider_reported_usd})
+    return cost
 
 
 @router.post("/chat", response_model=ChatResponse, responses={202: {"model": BatchAcceptedResponse}})
@@ -130,7 +141,10 @@ async def chat(
         output_flags=[],
         redactions_applied=input_result.redactions,
     )
-    response.cost = _compute_cost(normalised.provider, normalised.model, response.usage)
+    response.cost = _compute_cost(
+        normalised.provider, normalised.model, response.usage,
+        provider_reported_usd=response.cost.provider_reported_usd,
+    )
     # TODO: Step 10 — ledger write
     await cache.set(cache_key, response, ttl_seconds=settings.cache_ttl_seconds)
     return response
@@ -207,6 +221,7 @@ async def chat_stream(
         accumulated_tool_calls: dict[int, dict[str, str]] = {}
 
         final_citations: Optional[list] = None
+        final_reported_cost: Optional[float] = None
 
         async for event in transport.stream(normalised, tenant_key):
             print(f"[stream] chunk type: {event.type}, data type: {type(event.data).__name__}, data: {event.data}")
@@ -229,6 +244,7 @@ async def chat_stream(
                 final_usage = finish_data.usage
                 final_finish_reason = finish_data.finish_reason
                 final_citations = finish_data.citations
+                final_reported_cost = finish_data.provider_reported_usd
                 upstream_cache_hit = (final_usage.input_tokens_cache_read or 0) > 0
             elif event.type == "error":
                 error_data: ErrorData = event.data
@@ -238,7 +254,10 @@ async def chat_stream(
         upstream_ms = int((time.monotonic() - upstream_start) * 1000)
         elapsed_ms = int((time.monotonic() - start) * 1000)
 
-        computed_cost = _compute_cost(normalised.provider, normalised.model, final_usage)
+        computed_cost = _compute_cost(
+            normalised.provider, normalised.model, final_usage,
+            provider_reported_usd=final_reported_cost,
+        )
         finish = FinishData(
             id=request_id,
             finish_reason=final_finish_reason,

@@ -17,6 +17,7 @@ def make_cache_key(tenant_id: str, request: NormalisedLLMRequest) -> str:
             [t.model_dump(mode="json") for t in request.tools] if request.tools else None
         ),
         "params": request.params.model_dump(mode="json") if request.params else None,
+        "provider_options": request.provider_options,
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode()).hexdigest()

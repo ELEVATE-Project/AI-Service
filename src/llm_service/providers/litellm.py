@@ -445,7 +445,9 @@ class LiteLLMTransport(BaseLLMProvider):
                 if not chunk.choices:
                     if getattr(chunk, "usage", None):
                         final_usage = self._extract_usage(chunk)
-                        reported_cost = _extract_response_cost(chunk) or reported_cost
+                        chunk_cost = _extract_response_cost(chunk)
+                        if chunk_cost is not None:
+                            reported_cost = chunk_cost
                     continue
 
                 choice = chunk.choices[0]
@@ -478,7 +480,9 @@ class LiteLLMTransport(BaseLLMProvider):
 
                 if getattr(chunk, "usage", None):
                     final_usage = self._extract_usage(chunk)
-                    reported_cost = _extract_response_cost(chunk) or reported_cost
+                    chunk_cost = _extract_response_cost(chunk)
+                    if chunk_cost is not None:
+                        reported_cost = chunk_cost
 
         except Exception as stream_error:
             yield StreamEvent(

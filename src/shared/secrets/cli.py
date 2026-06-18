@@ -86,7 +86,7 @@ def keys_set(tenant: str, provider: str, key_format: str, data: str) -> None:
     try:
         asyncio.run(_run())
     except Exception as exc:  # surface a clean message instead of a traceback
-        raise click.ClickException(str(exc))
+        raise click.ClickException(str(exc)) from exc
     click.echo(f"✓ Key ({provider} / {key_format}) written for tenant {tenant!r}.")
 
 

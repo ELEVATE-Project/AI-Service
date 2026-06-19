@@ -68,7 +68,7 @@ GUARDRAILS_SIZE_CAP_INPUT_CHARS=100000
 GUARDRAILS_SIZE_CAP_OUTPUT_CHARS=50000
 
 # Cache — set to 0 to disable caching during development
-CACHE_TTL_SECONDS=300
+CACHE_TTL_SECONDS=0
 
 # Retry behaviour
 LLM_RETRY_MAX_ATTEMPTS=3
@@ -179,6 +179,18 @@ Add another tenant? (y/n): n
 You can skip all the optional Bedrock fields (session token, role name, S3 bucket, IAM role ARN) for regular chat and streaming. They are only needed if you plan to use the [Batch API](batch-api.md).
 
 If you add both Anthropic and Bedrock keys for the same tenant, run the script once and answer `y` to "Add another key" after the first one.
+
+---
+
+### OpenRouter example
+
+To add an OpenRouter key for a tenant, run:
+
+```bash
+uv run llm-service keys set --tenant=<tenant_id> --provider=openrouter --format=api_key --data='{"api_key":"<api_key>"}'
+```
+
+Replace `<tenant_id>` with your tenant ID (e.g. `saathi`) and `<api_key>` with your OpenRouter API key.
 
 ---
 

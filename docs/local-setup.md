@@ -10,7 +10,6 @@ This guide gets the project running on your machine from scratch.
 * Homebrew installed
 * Python 3.10
 * Git
-* Docker
 
 ---
 

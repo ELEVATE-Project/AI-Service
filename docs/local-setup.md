@@ -4,19 +4,65 @@ This guide gets the project running on your machine from scratch.
 
 ---
 
-## Step 1 — Install dependencies
+## Prerequisites
 
-From the project root:
+* macOS
+* Homebrew installed
+* Python 3.10
+* Git
+
+---
+
+## 1. Install Python 3.10
+
+```bash
+brew install python@3.10
+```
+
+Verify installation:
+
+```bash
+python3.10 --version
+```
+
+---
+
+## 2. Install uv and Set Up Virtual Environment
+
+### Step 1: Install uv
+
+Install uv using the official installer. Follow the instructions at:
+https://docs.astral.sh/uv/getting-started/installation/
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+Restart your shell or run `source $HOME/.local/bin/env` to make `uv` available.
+
+### Step 2: Go to the project directory
+
+```bash
+cd /path/to/ai-service
+```
+
+### Step 3: Create the virtual environment and install dependencies
+
+`uv sync` will automatically create a `.venv` directory and install all dependencies:
 
 ```bash
 uv sync
 ```
 
-This creates a `.venv` folder and installs everything listed in `pyproject.toml`, including the correct Python version.
+### Step 4: Activate the virtual environment
+
+```bash
+source .venv/bin/activate
+```
 
 ---
 
-## Step 2 — Install the spaCy language model
+## Step 3 — Install the spaCy language model
 
 The Presidio PII guardrail requires a spaCy model. This is a data download, not a Python package, so `uv sync` does not fetch it automatically. Run this once:
 
@@ -26,28 +72,69 @@ uv run python -m spacy download en_core_web_lg
 
 ---
 
-## Step 3 — Start Postgres and Redis
+## Step 4 — Set Up Local PostgreSQL Database
+
+### 4.1 Install PostgreSQL
+
+Using Homebrew:
 
 ```bash
-docker compose -f deploy/docker/docker-compose.yml up -d
+brew install postgresql@17
 ```
 
-This starts two containers:
-
-- **Postgres** on port `5432` — stores tenants, keys, ledger entries, policies
-- **Redis** on port `6379` — used for response caching
-
-To check they're running:
+Start PostgreSQL:
 
 ```bash
-docker compose -f deploy/docker/docker-compose.yml ps
+brew services start postgresql@17
 ```
 
-Both should show `healthy`.
+Verify it's running:
+
+```bash
+psql --version
+```
 
 ---
 
-## Step 4 — Configure environment variables
+### 4.2 Create the Database
+
+Login to Postgres:
+
+```bash
+psql -d postgres
+```
+
+Create the database:
+
+```sql
+CREATE DATABASE llm_service;
+```
+
+Exit psql:
+
+```sql
+\q
+```
+
+---
+
+### 4.3 Common Issues
+
+**Postgres not starting**
+
+```bash
+brew services restart postgresql@17
+```
+
+**Port conflict**
+
+```bash
+lsof -i :5432
+```
+
+---
+
+## Step 5 — Configure environment variables
 
 Create a `.env` file in the project root:
 
@@ -68,7 +155,7 @@ GUARDRAILS_SIZE_CAP_INPUT_CHARS=100000
 GUARDRAILS_SIZE_CAP_OUTPUT_CHARS=50000
 
 # Cache — set to 0 to disable caching during development
-CACHE_TTL_SECONDS=300
+CACHE_TTL_SECONDS=0
 
 # Retry behaviour
 LLM_RETRY_MAX_ATTEMPTS=3
@@ -88,7 +175,7 @@ Every variable must be present — the app fails fast on any missing config. The
 
 ---
 
-## Step 5 — Run database migrations
+## Step 6 — Run database migrations
 
 ```bash
 alembic upgrade head
@@ -98,7 +185,7 @@ This applies all migration files from `src/shared/db/migrations/versions/` and c
 
 ---
 
-## Step 6 — Register a tenant and provider key
+## Step 7 — Register a tenant and provider key
 
 Run the interactive setup script:
 
@@ -182,7 +269,19 @@ If you add both Anthropic and Bedrock keys for the same tenant, run the script o
 
 ---
 
-## Step 7 — Start the server
+### OpenRouter example
+
+To add an OpenRouter key for a tenant, run:
+
+```bash
+uv run llm-service keys set --tenant=<tenant_id> --provider=openrouter --format=api_key --data='{"api_key":"<api_key>"}'
+```
+
+Replace `<tenant_id>` with your tenant ID (e.g. `saathi`) and `<api_key>` with your OpenRouter API key.
+
+---
+
+## Step 8 — Start the server
 
 ```bash
 uv run uvicorn main:app --reload --port 8000
@@ -199,9 +298,9 @@ INFO:     Started reloader process
 
 ---
 
-## Step 8 — Verify everything works
+## Step 9 — Verify everything works
 
-Send a test request using the bearer token and tenant ID from Step 6:
+Send a test request using the bearer token and tenant ID from Step 7:
 
 Replace `<bearer-token>` with the token printed by the script, and `saathi` with your tenant ID:
 
@@ -251,16 +350,58 @@ If you get `422 missing_tenant_key` — re-run the script and add an Anthropic k
 
 ---
 
+## Set Up Redis (Local, optional)
+
+Redis is used for response caching. It is disabled by default (`CACHE_TTL_SECONDS=0`) so this step is only needed if you want to enable caching.
+
+### Install Redis
+
+```bash
+brew install redis
+```
+
+### Start Redis Server
+
+```bash
+brew services start redis
+```
+
+### Verify Redis Is Running
+
+```bash
+redis-cli ping
+```
+
+Expected output:
+
+```text
+PONG
+```
+
+### Common Redis Issues
+
+**Redis not running**
+
+```bash
+brew services restart redis
+```
+
+**Port already in use**
+
+```bash
+lsof -i :6379
+```
+
+---
+
 ## Useful commands
 
 ```bash
-# Stop Docker services
-docker compose -f deploy/docker/docker-compose.yml down
-
-# Wipe the database and start fresh
-docker compose -f deploy/docker/docker-compose.yml down -v
-docker compose -f deploy/docker/docker-compose.yml up -d
+# Apply all pending migrations
 alembic upgrade head
+
+# Create a new migration
+alembic revision --autogenerate -m "your migration message"
 
 # Start the Arq background worker (needed for batch jobs)
 uv run arq src.shared.queue.worker.WorkerSettings

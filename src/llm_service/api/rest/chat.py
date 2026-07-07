@@ -76,6 +76,7 @@ async def chat(
 ) -> Union[ChatResponse, JSONResponse]:
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
+    print(f"[chat] request: {body.model_dump_json(indent=2)}")
     normalised = normalise(body)
     try:
         tenant_key = await secret_backend.get_key(tenant.id, body.provider)
@@ -89,6 +90,7 @@ async def chat(
     except PolicyExceededError as e:
         raise HTTPException(status_code=429, detail=e.detail)
     input_result = await guardrails.check_input([m.model_dump() for m in normalised.messages])
+    print(f"[chat] guardrails input_result: {input_result!r}")
     if input_result.blocked:
         raise HTTPException(status_code=400, detail="guardrails_blocked")
     if input_result.modified_messages is not None:
@@ -147,6 +149,7 @@ async def chat(
     )
     # TODO: Step 10 — ledger write
     await cache.set(cache_key, response, ttl_seconds=settings.cache_ttl_seconds)
+    print(f"[chat] response: {response.model_dump_json(indent=2)}")
     return response
 
 

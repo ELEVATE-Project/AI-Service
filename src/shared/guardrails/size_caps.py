@@ -11,7 +11,9 @@ class SizeCapsGuardrails(GuardrailsChecker):
         self._max_output_chars = max_output_chars
 
     async def check_input(self, messages: list[dict]) -> GuardrailsResult:
-        total = sum(len(msg.get("content") or "") for msg in messages)
+        total = sum(
+            len(msg.get("content") or "") for msg in messages if msg.get("role") != "system"
+        )
         if total > self._max_input_chars:
             return GuardrailsResult(blocked=True, flags=["size.input_too_large"])
         return GuardrailsResult()

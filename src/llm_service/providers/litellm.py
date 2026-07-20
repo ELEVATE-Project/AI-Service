@@ -275,6 +275,32 @@ class LiteLLMTransport(BaseLLMProvider):
             total_tokens=getattr(raw_usage, "total_tokens", 0) or 0,
         )
 
+    def _normalize_citations(self, raw_message: Any) -> Optional[list[Any]]:
+        """Anthropic's shape is List[List[{type, url, title, cited_text, ...}]] via
+        provider_specific_fields. OpenRouter/OpenAI web search instead returns a flat
+        List[{type: "url_citation", url_citation: {url, title, content, ...}}] via
+        `annotations` — reshape it to match Anthropic's so callers need only one shape.
+        """
+        provider_fields = getattr(raw_message, "provider_specific_fields", None) or {}
+        anthropic_citations = provider_fields.get("citations") or provider_fields.get("web_search_results")
+        if anthropic_citations:
+            return anthropic_citations
+
+        annotations = getattr(raw_message, "annotations", None)
+        if not annotations:
+            return None
+        normalized = [
+            {
+                "type": annotation.get("type", "url_citation"),
+                "url": (annotation.get("url_citation") or {}).get("url"),
+                "title": (annotation.get("url_citation") or {}).get("title"),
+                "cited_text": (annotation.get("url_citation") or {}).get("content"),
+            }
+            for annotation in annotations
+            if annotation.get("type") == "url_citation"
+        ]
+        return [normalized] if normalized else None
+
     def _map_choices(self, raw: Any) -> list[Choice]:
         choices = []
         for raw_choice in raw.choices:
@@ -292,8 +318,7 @@ class LiteLLMTransport(BaseLLMProvider):
                     }
                     for tool_call in raw_message.tool_calls
                 ]
-            provider_fields = getattr(raw_message, "provider_specific_fields", None) or {}
-            citations = provider_fields.get("citations") or None
+            citations = self._normalize_citations(raw_message)
             choices.append(Choice(
                 index=raw_choice.index,
                 message=ChoiceMessage(
@@ -500,12 +525,11 @@ class LiteLLMTransport(BaseLLMProvider):
             try:
                 assembled = litellm.stream_chunk_builder(all_chunks)
                 if assembled and assembled.choices:
-                    psf = getattr(assembled.choices[0].message, "provider_specific_fields", None) or {}
-                    if isinstance(psf, dict):
-                        citations = psf.get("citations") or psf.get("web_search_results") or None
-                        if citations and not isinstance(citations, list):
-                            citations = [citations]
-                        final_citations = citations or None
+                    assembled_message = assembled.choices[0].message
+                    citations = self._normalize_citations(assembled_message)
+                    if citations and not isinstance(citations, list):
+                        citations = [citations]
+                    final_citations = citations or None
                     if reported_cost is None:
                         reported_cost = _extract_response_cost(assembled)
             except Exception:

@@ -282,9 +282,9 @@ class LiteLLMTransport(BaseLLMProvider):
         `annotations` — reshape it to match Anthropic's so callers need only one shape.
         """
         provider_fields = getattr(raw_message, "provider_specific_fields", None) or {}
-        anthropic_citations = provider_fields.get("citations") or provider_fields.get("web_search_results")
-        if anthropic_citations:
-            return anthropic_citations
+        provider_citations = provider_fields.get("citations") or provider_fields.get("web_search_results")
+        if provider_citations:
+            return provider_citations if isinstance(provider_citations, list) else [provider_citations]
 
         annotations = getattr(raw_message, "annotations", None)
         if not annotations:
@@ -526,10 +526,7 @@ class LiteLLMTransport(BaseLLMProvider):
                 assembled = litellm.stream_chunk_builder(all_chunks)
                 if assembled and assembled.choices:
                     assembled_message = assembled.choices[0].message
-                    citations = self._normalize_citations(assembled_message)
-                    if citations and not isinstance(citations, list):
-                        citations = [citations]
-                    final_citations = citations or None
+                    final_citations = self._normalize_citations(assembled_message)
                     if reported_cost is None:
                         reported_cost = _extract_response_cost(assembled)
             except Exception:

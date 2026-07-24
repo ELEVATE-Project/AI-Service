@@ -162,13 +162,14 @@ def test_compute_cost_prefers_reported_over_yaml() -> None:
     from src.llm_service.api.rest.chat import _compute_cost
     from src.llm_service.schemas.chat import UsageBlock
 
-    # Unknown OpenRouter model → YAML computed cost is 0, reported cost wins.
+    # Unknown OpenRouter model → YAML has no pricing entry, so computed_usd falls back
+    # to the provider-reported cost (callers should only ever need to read computed_usd).
     cost = _compute_cost(
         "openrouter", "openai/gpt-4o", UsageBlock(input_tokens=10, output_tokens=5),
         provider_reported_usd=0.0042,
     )
     assert cost.provider_reported_usd == 0.0042
-    assert cost.computed_usd == 0.0
+    assert cost.computed_usd == 0.0042
 
 
 def test_compute_cost_none_reported_leaves_field_unset() -> None:

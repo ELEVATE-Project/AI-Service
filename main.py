@@ -2,6 +2,7 @@ from fastapi import FastAPI
 
 from src.llm_service.api.rest.batch import router as batch_router
 from src.llm_service.api.rest.chat import router as chat_router
+from src.llm_service.api.rest.models import router as models_router
 
 app = FastAPI(
     title="ai-service",
@@ -11,3 +12,4 @@ app = FastAPI(
 
 app.include_router(chat_router)
 app.include_router(batch_router)
+app.include_router(models_router)

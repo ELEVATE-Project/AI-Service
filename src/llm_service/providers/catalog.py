@@ -7,7 +7,7 @@ import litellm
 
 from src.llm_service.schemas.models import ModelInfo, ModelPricing
 
-_OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models/user"
+_OPENROUTER_MODELS_URL = "https://openrouter.ai/api/v1/models"
 
 # litellm_provider tags that are cost-table categories, not routable providers.
 _PROVIDER_ALIASES: dict[str, str] = {
@@ -103,7 +103,7 @@ async def get_openrouter_model_endpoints(api_key: str, model: str) -> dict:
     """
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(
-            f"{_OPENROUTER_MODELS_URL.rsplit('/', 1)[0]}/{model}/endpoints",
+            f"{_OPENROUTER_MODELS_URL}/{model}/endpoints",
             headers={"Authorization": f"Bearer {api_key}"},
         )
         resp.raise_for_status()
@@ -117,7 +117,7 @@ async def list_openrouter_models(api_key: str) -> list[ModelInfo]:
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(
             _OPENROUTER_MODELS_URL,
-            params={"limit": 500},
+            params={"output_modalities": "all"},
             headers={"Authorization": f"Bearer {api_key}"},
         )
         resp.raise_for_status()

@@ -7,10 +7,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.llm_service.api.deps import get_secret_backend, get_tenant
 from src.llm_service.providers.catalog import (
-    get_openrouter_model_endpoints, known_litellm_providers, list_litellm_models, list_openrouter_models,
+    get_openrouter_model_endpoints, known_litellm_providers, known_modes,
+    list_litellm_models, list_openrouter_models,
 )
 from src.llm_service.schemas.models import (
-    ModelEndpointsResponse, ModelInfo, ModelsListResponse, ProviderInfo, ProvidersListResponse,
+    ModelEndpointsResponse, ModelInfo, ModelsListResponse, ModesListResponse,
+    ProviderInfo, ProvidersListResponse,
 )
 from src.shared.db.models import Tenant
 from src.shared.secrets.backend import MissingTenantKeyError, SecretBackend
@@ -24,6 +26,11 @@ async def list_providers(tenant: Tenant = Depends(get_tenant)) -> ProvidersListR
         ProviderInfo(name=name, source="litellm") for name in sorted(known_litellm_providers())
     ]
     return ProvidersListResponse(data=providers)
+
+
+@router.get("/models/modes", response_model=ModesListResponse)
+async def list_modes(tenant: Tenant = Depends(get_tenant)) -> ModesListResponse:
+    return ModesListResponse(data=sorted(known_modes()))
 
 
 @router.get("/models", response_model=ModelsListResponse)

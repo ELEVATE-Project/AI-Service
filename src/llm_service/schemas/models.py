@@ -44,6 +44,10 @@ class ProvidersListResponse(BaseModel):
     data: list[ProviderInfo]
 
 
+class ModesListResponse(BaseModel):
+    data: list[str]
+
+
 class ModelEndpointsResponse(BaseModel):
     # Raw pass-through of OpenRouter's per-model endpoints response —
     # the upstream hosting providers (DeepInfra, Nebius, ...) for one model.

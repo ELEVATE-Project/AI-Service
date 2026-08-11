@@ -36,6 +36,42 @@ def _strip_provider_prefix(provider: str, key: str) -> str:
     return key.split("/", 1)[1] if "/" in key else key
 
 
+_OPENROUTER_OUTPUT_MODE: dict[str, str] = {
+    "embeddings": "embedding",
+    "speech": "audio_speech",
+    "transcription": "audio_transcription",
+    "rerank": "rerank",
+    "image": "image_generation",
+    "video": "video_generation",
+}
+
+
+def _openrouter_mode(modality: str) -> Optional[str]:
+    output = modality.rsplit("->", 1)[-1]
+    if output in _OPENROUTER_OUTPUT_MODE:
+        return _OPENROUTER_OUTPUT_MODE[output]
+    if "text" in output.split("+"):
+        return "chat"
+    return None
+
+
+def known_modes() -> set[str]:
+    """Every mode value that can actually appear on a ModelInfo — litellm's
+    own mode field values, plus everything _openrouter_mode can produce.
+    Only counts entries with a valid provider, same as list_litellm_models,
+    so litellm's non-model documentation entries (e.g. "sample_spec") don't
+    leak a bogus mode value through.
+    """
+    modes = {
+        info.get("mode") for info in litellm.model_cost.values()
+        if _canonical_provider(info.get("litellm_provider") or "") is not None
+    }
+    modes.discard(None)
+    modes.update(_OPENROUTER_OUTPUT_MODE.values())
+    modes.add("chat")
+    return modes
+
+
 def known_litellm_providers() -> set[str]:
     """Every provider in litellm's bundled catalog, minus openrouter (handled
     separately via its own live API). Derived from litellm.model_cost rather
@@ -139,6 +175,7 @@ async def list_openrouter_models(api_key: str) -> list[ModelInfo]:
             provider="openrouter",
             id=entry["id"],
             name=entry.get("name", entry["id"]),
+            mode=_openrouter_mode(architecture.get("modality", "")),
             context_length=entry.get("context_length"),
             max_output_tokens=top_provider.get("max_completion_tokens"),
             pricing=ModelPricing(

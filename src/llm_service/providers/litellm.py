@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import io
 import json
+import math
 import random
 import time
 from collections.abc import AsyncIterator
@@ -129,14 +130,18 @@ def _extract_response_cost(raw: Any) -> Optional[float]:
     hidden = getattr(raw, "_hidden_params", None)
     if isinstance(hidden, dict) and hidden.get("response_cost") is not None:
         try:
-            return float(hidden["response_cost"])
+            value = float(hidden["response_cost"])
+            if math.isfinite(value) and value >= 0:
+                return value
         except (TypeError, ValueError):
             pass
     usage = getattr(raw, "usage", None)
     cost = getattr(usage, "cost", None) if usage is not None else None
     if cost is not None:
         try:
-            return float(cost)
+            value = float(cost)
+            if math.isfinite(value) and value >= 0:
+                return value
         except (TypeError, ValueError):
             pass
     return None

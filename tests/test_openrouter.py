@@ -83,6 +83,22 @@ def test_extract_cost_none_when_absent() -> None:
     assert _extract_response_cost(_FakeRaw()) is None
 
 
+def test_extract_cost_rejects_negative() -> None:
+    assert _extract_response_cost(_FakeRaw(hidden={"response_cost": -0.01})) is None
+
+
+def test_extract_cost_rejects_nan() -> None:
+    assert _extract_response_cost(_FakeRaw(hidden={"response_cost": float("nan")})) is None
+
+
+def test_extract_cost_rejects_infinite() -> None:
+    assert _extract_response_cost(_FakeRaw(hidden={"response_cost": float("inf")})) is None
+
+
+def test_extract_cost_rejects_negative_usage_cost() -> None:
+    assert _extract_response_cost(_FakeRaw(hidden={}, cost=-0.05)) is None
+
+
 # ── chat() surfaces provider-reported cost ──────────────────────────────────
 
 @pytest.mark.asyncio

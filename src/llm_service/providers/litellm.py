@@ -133,7 +133,7 @@ def _extract_response_cost(raw: Any) -> Optional[float]:
             value = float(hidden["response_cost"])
             if math.isfinite(value) and value >= 0:
                 return value
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             pass
     usage = getattr(raw, "usage", None)
     cost = getattr(usage, "cost", None) if usage is not None else None
@@ -142,7 +142,7 @@ def _extract_response_cost(raw: Any) -> Optional[float]:
             value = float(cost)
             if math.isfinite(value) and value >= 0:
                 return value
-        except (TypeError, ValueError):
+        except (TypeError, ValueError, OverflowError):
             pass
     return None
 

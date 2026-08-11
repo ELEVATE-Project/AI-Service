@@ -95,6 +95,14 @@ def test_extract_cost_rejects_infinite() -> None:
     assert _extract_response_cost(_FakeRaw(hidden={"response_cost": float("inf")})) is None
 
 
+def test_extract_cost_survives_oversized_int() -> None:
+    assert _extract_response_cost(_FakeRaw(hidden={"response_cost": 10**400})) is None
+
+
+def test_extract_cost_survives_oversized_usage_cost() -> None:
+    assert _extract_response_cost(_FakeRaw(hidden={}, cost=10**400)) is None
+
+
 def test_extract_cost_rejects_negative_usage_cost() -> None:
     assert _extract_response_cost(_FakeRaw(hidden={}, cost=-0.05)) is None
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
 import json
 import math
@@ -118,6 +119,108 @@ def _build_fallbacks(
         {"model": model_str, **{**credential_kwargs, region_key: region}}
         for region in regions[1:]
     ]
+
+
+def _patch_anthropic_hidden_original_response() -> None:
+    """Work around a LiteLLM bug (confirmed against litellm==1.83.0) that discards the
+    raw, ordered Anthropic content-block array before ``litellm.acompletion()`` ever
+    returns it to us.
+
+    ``AnthropicConfig.transform_response`` sets it, then two lines later clobbers it:
+
+        model_response._hidden_params["original_response"] = completion_response["content"]
+        ...
+        _hidden_params["provider_specific_fields"] = provider_specific_fields
+        model_response._hidden_params = _hidden_params  # <- different dict, wipes the line above
+
+    ``_dedupe_leading_narration`` below needs those raw blocks to undo LiteLLM's lossy
+    text-flattening for interleaved server-tool responses (e.g. native ``web_search``).
+    We can't read this from ``_hidden_params`` after the fact — LiteLLM's async logging
+    callback does get the raw body, but it's dispatched to a background worker with no
+    guaranteed ordering relative to when ``acompletion()`` returns, so there's no
+    race-free way to consume it there either. Instead, wrap the (buggy) method itself:
+    call the original unchanged, then re-derive the same data from the same
+    ``raw_response`` httpx.Response it was already given, and restore it onto the
+    ``model_response`` it already produced — after LiteLLM's own clobber has happened.
+
+    Idempotent (safe under uvicorn --reload) and fails silently if LiteLLM's internals
+    no longer match this shape — in which case ``_dedupe_leading_narration`` just falls
+    back to returning the unmodified (still-flattened) content, exactly as it did before
+    this patch existed.
+    """
+    try:
+        from litellm.llms.anthropic.chat.transformation import AnthropicConfig
+    except ImportError:
+        return
+    if getattr(AnthropicConfig.transform_response, "_ai_service_patched", False):
+        return
+
+    original = AnthropicConfig.transform_response
+    signature = inspect.signature(original)
+
+    def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
+        model_response = original(self, *args, **kwargs)
+        try:
+            hidden = getattr(model_response, "_hidden_params", None)
+            if isinstance(hidden, dict) and "original_response" not in hidden:
+                bound = signature.bind(self, *args, **kwargs)
+                bound.apply_defaults()
+                raw_response = bound.arguments.get("raw_response")
+                if raw_response is not None:
+                    hidden["original_response"] = raw_response.json().get("content")
+        except Exception:
+            pass
+        return model_response
+
+    _patched._ai_service_patched = True  # type: ignore[attr-defined]
+    AnthropicConfig.transform_response = _patched
+
+
+_patch_anthropic_hidden_original_response()
+
+
+def _dedupe_leading_narration(raw: Any, flattened_content: Optional[str]) -> Optional[str]:
+    """Undo LiteLLM's lossy flattening of interleaved Anthropic content blocks.
+
+    A server-side tool (e.g. native ``web_search``) runs mid-generation, so a single
+    Anthropic turn can look like ``[text, server_tool_use, tool_result, text]`` — narration
+    before the search, then the real answer after it. LiteLLM's Anthropic adapter
+    concatenates every ``text`` block into one string with no boundary marker
+    (``litellm/llms/anthropic/chat/transformation.py:extract_response_content``), so that
+    leading narration ends up glued onto the final answer.
+
+    The pre-flatten block array survives on ``raw._hidden_params["original_response"]``.
+    Group its blocks into runs of consecutive ``text`` blocks; if more than one run exists,
+    keep only the last one (the model's true final answer). A single run — including the
+    ordinary "narration ending in a client tool_use" pattern, where the tool call is the
+    last block and there's nothing after it — is left untouched.
+    """
+    hidden = getattr(raw, "_hidden_params", None)
+    original_blocks = hidden.get("original_response") if isinstance(hidden, dict) else None
+    if not isinstance(original_blocks, list):
+        return flattened_content
+
+    text_runs: list[str] = []
+    current_run = ""
+    in_run = False
+    for block in original_blocks:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text":
+            current_run += block.get("text") or ""
+            in_run = True
+        elif in_run:
+            text_runs.append(current_run)
+            current_run = ""
+            in_run = False
+    if in_run:
+        text_runs.append(current_run)
+
+    if len(text_runs) <= 1:
+        return flattened_content
+
+    final_answer = text_runs[-1].strip()
+    return final_answer or flattened_content
 
 
 def _extract_response_cost(raw: Any) -> Optional[float]:
@@ -324,11 +427,12 @@ class LiteLLMTransport(BaseLLMProvider):
                     for tool_call in raw_message.tool_calls
                 ]
             citations = self._normalize_citations(raw_message)
+            content = _dedupe_leading_narration(raw, raw_message.content)
             choices.append(Choice(
                 index=raw_choice.index,
                 message=ChoiceMessage(
                     role=raw_message.role,
-                    content=raw_message.content,
+                    content=content,
                     tool_calls=tool_calls,
                     citations=citations,
                 ),

@@ -83,6 +83,30 @@ def test_extract_cost_none_when_absent() -> None:
     assert _extract_response_cost(_FakeRaw()) is None
 
 
+def test_extract_cost_rejects_negative() -> None:
+    assert _extract_response_cost(_FakeRaw(hidden={"response_cost": -0.01})) is None
+
+
+def test_extract_cost_rejects_nan() -> None:
+    assert _extract_response_cost(_FakeRaw(hidden={"response_cost": float("nan")})) is None
+
+
+def test_extract_cost_rejects_infinite() -> None:
+    assert _extract_response_cost(_FakeRaw(hidden={"response_cost": float("inf")})) is None
+
+
+def test_extract_cost_survives_oversized_int() -> None:
+    assert _extract_response_cost(_FakeRaw(hidden={"response_cost": 10**400})) is None
+
+
+def test_extract_cost_survives_oversized_usage_cost() -> None:
+    assert _extract_response_cost(_FakeRaw(hidden={}, cost=10**400)) is None
+
+
+def test_extract_cost_rejects_negative_usage_cost() -> None:
+    assert _extract_response_cost(_FakeRaw(hidden={}, cost=-0.05)) is None
+
+
 # ── chat() surfaces provider-reported cost ──────────────────────────────────
 
 @pytest.mark.asyncio
@@ -162,13 +186,14 @@ def test_compute_cost_prefers_reported_over_yaml() -> None:
     from src.llm_service.api.rest.chat import _compute_cost
     from src.llm_service.schemas.chat import UsageBlock
 
-    # Unknown OpenRouter model → YAML computed cost is 0, reported cost wins.
+    # Unknown OpenRouter model → YAML has no pricing entry, so computed_usd falls back
+    # to the provider-reported cost (callers should only ever need to read computed_usd).
     cost = _compute_cost(
         "openrouter", "openai/gpt-4o", UsageBlock(input_tokens=10, output_tokens=5),
         provider_reported_usd=0.0042,
     )
     assert cost.provider_reported_usd == 0.0042
-    assert cost.computed_usd == 0.0
+    assert cost.computed_usd == 0.0042
 
 
 def test_compute_cost_none_reported_leaves_field_unset() -> None:

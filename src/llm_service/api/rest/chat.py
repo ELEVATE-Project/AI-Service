@@ -44,10 +44,11 @@ def _compute_cost(
     provider: str, model: str, usage: "UsageBlock",
     provider_reported_usd: Optional[float] = None,
 ) -> CostBlock:
-    """Build the cost envelope: YAML-computed cost plus any provider-reported cost.
+    """Build the cost envelope: YAML-computed cost, falling back to provider-reported cost.
 
-    For providers that report cost (e.g. OpenRouter), provider_reported_usd is the
-    authoritative figure; computed_usd is 0 when the model has no YAML pricing entry.
+    computed_usd is always the figure callers should use: it comes from YAML pricing
+    when available, otherwise from provider_reported_usd. provider_reported_usd is kept
+    alongside as the raw provider figure for reference/auditing.
     """
     try:
         cost = pricing_table.compute_cost(
@@ -59,7 +60,7 @@ def _compute_cost(
             cache_read_tokens=usage.input_tokens_cache_read or 0,
         )
     except UnknownModelError:
-        cost = CostBlock()
+        cost = CostBlock(computed_usd=provider_reported_usd or 0.0)
     if provider_reported_usd is not None:
         cost = cost.model_copy(update={"provider_reported_usd": provider_reported_usd})
     return cost

@@ -150,13 +150,12 @@ def _patch_anthropic_hidden_original_response() -> None:
     """
     try:
         from litellm.llms.anthropic.chat.transformation import AnthropicConfig
-    except ImportError:
+        if getattr(AnthropicConfig.transform_response, "_ai_service_patched", False):
+            return
+        original = AnthropicConfig.transform_response
+        signature = inspect.signature(original)
+    except (ImportError, AttributeError, TypeError, ValueError):
         return
-    if getattr(AnthropicConfig.transform_response, "_ai_service_patched", False):
-        return
-
-    original = AnthropicConfig.transform_response
-    signature = inspect.signature(original)
 
     def _patched(self: Any, *args: Any, **kwargs: Any) -> Any:
         model_response = original(self, *args, **kwargs)

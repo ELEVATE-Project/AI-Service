@@ -125,6 +125,7 @@ OpenRouter gives a tenant access to OpenRouter's full model catalog through a si
 |---|---|---|
 | `provider` | `extra_body.provider` | OpenRouter routing prefs (`order`, `allow_fallbacks`, `data_collection`, `require_parameters`) |
 | `models` | `extra_body.models` | Model fallback list |
+| `plugins` | `extra_body.plugins` | OpenRouter plugins, e.g. `[{"id": "web"}]` for web search |
 | `referer` / `title` | `HTTP-Referer` / `X-Title` headers | App attribution (defaults from `OPENROUTER_APP_URL` / `OPENROUTER_APP_TITLE`) |
 
 ```json
@@ -139,6 +140,8 @@ OpenRouter gives a tenant access to OpenRouter's full model catalog through a si
   }
 }
 ```
+
+**Web search:** the provider-agnostic `params.web_search_options` (see [`docs/usage.md`](usage.md)) is enough to enable web search — no need to know OpenRouter's plugin format. If set and `provider_options.plugins` isn't already given explicitly, the gateway synthesises `extra_body.plugins = [{"id": "web", "max_results": <n>}]` automatically, mapping `search_context_size` to `max_results` (`low`→3, `medium`→5, `high`→8; omitted if `search_context_size` isn't set). Pass `provider_options.plugins` directly for full manual control (e.g. a custom `search_prompt`), which always takes precedence.
 
 **Batch:** OpenRouter has no batch API. It is not in `BATCH_ELIGIBLE_PROVIDERS`, so a `metadata.batch = true` request for `openrouter` returns `422 provider_not_batch_eligible`.
 

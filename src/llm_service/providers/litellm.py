@@ -32,6 +32,12 @@ _PROVIDER_REMAP: dict[str, str] = {
     "custom_endpoint": "http://<endpoint>",
 }
 
+_WEB_SEARCH_CONTEXT_SIZE_TO_MAX_RESULTS: dict[str, int] = {
+    "low": 3,
+    "medium": 5,
+    "high": 8,
+}
+
 _RETRYABLE_ERRORS = (
     litellm.Timeout,
     litellm.ServiceUnavailableError,
@@ -308,9 +314,15 @@ class LiteLLMTransport(BaseLLMProvider):
     def _openrouter_kwargs(self, request: NormalisedLLMRequest) -> dict[str, Any]:
         """Map provider_options to LiteLLM extra_body / extra_headers for OpenRouter.
 
-        OpenRouter reads routing prefs (``provider``) and a fallback list
-        (``models``) from the request body, and app attribution from the
+        OpenRouter reads routing prefs (``provider``), a fallback list
+        (``models``), and plugin config (``plugins``, e.g. the web search
+        plugin) from the request body, and app attribution from the
         HTTP-Referer / X-Title headers. Returns {} for any other provider.
+
+        If the caller set the provider-agnostic ``params.web_search_options``
+        but didn't already pass an explicit ``plugins`` override, the web
+        search plugin is synthesised automatically so callers don't need to
+        know OpenRouter's plugin format.
         """
         if request.provider != "openrouter":
             return {}
@@ -321,6 +333,14 @@ class LiteLLMTransport(BaseLLMProvider):
             extra_body["provider"] = options["provider"]
         if options.get("models") is not None:
             extra_body["models"] = options["models"]
+        if options.get("plugins") is not None:
+            extra_body["plugins"] = options["plugins"]
+        elif request.params is not None and request.params.web_search_options is not None:
+            web_plugin: dict[str, Any] = {"id": "web"}
+            context_size = request.params.web_search_options.search_context_size
+            if context_size in _WEB_SEARCH_CONTEXT_SIZE_TO_MAX_RESULTS:
+                web_plugin["max_results"] = _WEB_SEARCH_CONTEXT_SIZE_TO_MAX_RESULTS[context_size]
+            extra_body["plugins"] = [web_plugin]
 
         referer = options.get("referer") or settings.openrouter_app_url
         title = options.get("title") or settings.openrouter_app_title

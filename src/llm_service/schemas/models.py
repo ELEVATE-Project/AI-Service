@@ -52,3 +52,15 @@ class ModelEndpointsResponse(BaseModel):
     # Raw pass-through of OpenRouter's per-model endpoints response —
     # the upstream hosting providers (DeepInfra, Nebius, ...) for one model.
     data: dict[str, Any]
+
+
+class CacheOptionsInfo(BaseModel):
+    providers: list[str]
+    ttl_values: list[str]
+    ttl_default: Optional[str] = None
+    target_values: list[str]
+    target_default: list[str]
+
+
+class CacheOptionsResponse(BaseModel):
+    data: CacheOptionsInfo

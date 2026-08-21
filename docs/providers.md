@@ -103,7 +103,53 @@ raw = await litellm.acompletion(
 
 **Multi-region failover:** if the registry entry has multiple regions, LiteLLM's `fallbacks=[...]` mechanism is used. The primary region is tried first; on failure, subsequent regions are tried automatically by the SDK.
 
-**Prompt caching:** for Anthropic and Bedrock, messages marked with `cache: "ephemeral"` get `cache_control` blocks injected before sending. OpenAI prompt caching is automatic (no explicit markers needed).
+**Prompt caching:** see [Prompt caching](#prompt-caching) below.
+
+---
+
+## Prompt caching
+
+Provider-side prompt caching (Anthropic's `cache_control`) lets a repeated static prefix — a long system prompt, a tool schema — be reused server-side across separate requests instead of reprocessed every time. Supported for `anthropic`, `bedrock`, and `openrouter` (for Claude/Gemini/MiniMax/GLM/z-ai models — LiteLLM silently drops the marker for unsupported OpenRouter models rather than erroring). It's a no-op for `openai`, whose caching is automatic and needs no marker at all.
+
+There are two ways to opt in, and they compose — `_serialize_messages`/`_serialize_tools` in `providers/litellm.py` implement both:
+
+**1. Explicit, per-message** — the calling service marks exactly what it wants cached:
+
+```json
+{"role": "system", "content": "...", "cache": "ephemeral"}
+```
+
+**2. Automatic, via `params.cache_options`** — the calling service just flips a switch and the gateway picks sensible cache points, so it doesn't have to reason about which messages to mark:
+
+```json
+"params": {
+  "cache_options": {"enabled": true, "ttl": "1h", "targets": ["prompt", "tools"]}
+}
+```
+
+| `cache_options` field | Type | Meaning |
+|---|---|---|
+| `enabled` | `bool` | Opt-in. When true, the gateway caches the *last* `role: "system"` message (if `"prompt"` is a target) and the *last* tool definition (if `"tools"` is a target and `tools` is present) — the two places static, reused content usually lives. Never touches user/assistant turns. |
+| `ttl` | `string?` | `"5m"` (Anthropic default) or `"1h"` (2× write cost, useful for prefixes reused less often than every 5 minutes). Omit to use the provider's own default. Applies to every `cache_control` block this request builds, whether from `enabled` or an explicit per-message marker. |
+| `targets` | `string[]?` | Which of `"prompt"` / `"tools"` to auto-cache. Omitted + `enabled: true` → both. |
+
+An explicit `"cache": "ephemeral"` on a message always overrides `enabled` for that specific message — auto-caching only fills in what wasn't already marked. Supported `ttl`/`targets` values are enforced by the request schema (a bad value is a `422`, not a silent no-op) and are also served live at `GET /v1/cache/options`, so calling services can read current supported values instead of hardcoding them:
+
+```json
+{
+  "data": {
+    "providers": ["anthropic", "bedrock", "openrouter"],
+    "ttl_values": ["5m", "1h"],
+    "ttl_default": null,
+    "target_values": ["prompt", "tools"],
+    "target_default": ["prompt", "tools"]
+  }
+}
+```
+
+**Wire format:** Anthropic (direct/Bedrock) needs `cache_control` nested inside a content block (`{"type": "text", "text": "...", "cache_control": {"type": "ephemeral"}}`); OpenRouter takes it as a top-level key on the message/tool dict and LiteLLM's own OpenRouter adapter relocates or strips it depending on model support (`llms/openrouter/chat/transformation.py:_move_cache_control_to_content`).
+
+Note this is unrelated to the gateway's own Redis response cache (`cache.our_cache_hit` — see [Response Cache](cache.md)), which is a separate, fully automatic exact-request-match cache.
 
 ---
 

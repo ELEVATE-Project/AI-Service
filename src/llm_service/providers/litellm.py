@@ -19,8 +19,8 @@ from src.llm_service.providers.base import (
     BaseLLMProvider, StreamEvent, TransportFinishData, UpstreamTransportError,
 )
 from src.llm_service.schemas.chat import (
-    CacheBlock, ChatResponse, Choice, ChoiceMessage, ErrorData,
-    NormalisedLLMRequest, TokenData, ToolUseData, UsageBlock,
+    CACHE_CAPABLE_PROVIDERS, CACHE_TARGET_DEFAULT, CacheBlock, ChatResponse, Choice,
+    ChoiceMessage, ErrorData, NormalisedLLMRequest, TokenData, ToolUseData, UsageBlock,
 )
 from src.shared.config import settings
 from src.shared.db.enums import BatchJobStatus, KeyFormat, Transport
@@ -228,6 +228,13 @@ def _dedupe_leading_narration(raw: Any, flattened_content: Optional[str]) -> Opt
     return final_answer or flattened_content
 
 
+def _cache_control_block(ttl: Optional[str]) -> dict[str, Any]:
+    block: dict[str, Any] = {"type": "ephemeral"}
+    if ttl:
+        block["ttl"] = ttl
+    return block
+
+
 def _extract_response_cost(raw: Any) -> Optional[float]:
     """Best-effort provider-reported response cost in USD.
 
@@ -357,28 +364,69 @@ class LiteLLMTransport(BaseLLMProvider):
             kwargs["extra_headers"] = extra_headers
         return kwargs
 
+    def _cache_options_state(
+        self, provider: str, params: Optional[Any]
+    ) -> tuple[bool, set[str], Optional[str]]:
+        """Resolve (auto_enabled, targets, ttl) for provider-side prompt caching.
+
+        ``auto_enabled`` is False whenever the provider doesn't support prompt
+        caching at all, regardless of what the caller asked for.
+        """
+        cache_options = getattr(params, "cache_options", None) if params else None
+        if provider not in CACHE_CAPABLE_PROVIDERS or not cache_options or not cache_options.enabled:
+            return False, set(), (cache_options.ttl if cache_options else None)
+        targets = set(cache_options.targets) if cache_options.targets else set(CACHE_TARGET_DEFAULT)
+        return True, targets, cache_options.ttl
+
     def _serialize_messages(
-        self, messages: list[Any], provider: str
+        self, messages: list[Any], provider: str, params: Optional[Any] = None
     ) -> list[dict[str, Any]]:
+        auto, targets, ttl = self._cache_options_state(provider, params)
+        auto_prompt = auto and "prompt" in targets
+        last_system_idx = None
+        if auto_prompt:
+            for i, message in enumerate(messages):
+                if message.role == "system":
+                    last_system_idx = i
+
         result: list[dict[str, Any]] = []
-        for message in messages:
+        for i, message in enumerate(messages):
             serialised = message.model_dump(exclude={"cache"}, exclude_none=True)
-            # Anthropic requires explicit cache_control blocks for prompt caching;
-            # LiteLLM forwards them unchanged when present.
-            if (
-                provider in ("anthropic", "bedrock")
-                and message.cache == "ephemeral"
-                and isinstance(message.content, str)
-            ):
+            should_cache = message.cache == "ephemeral" or i == last_system_idx
+            if not should_cache or provider not in CACHE_CAPABLE_PROVIDERS:
+                result.append(serialised)
+                continue
+
+            # Anthropic (direct/Bedrock) requires cache_control nested in a content
+            # block; OpenRouter takes it as a top-level key and relocates it itself
+            # (litellm/llms/openrouter/chat/transformation.py:_move_cache_control_to_content),
+            # silently dropping it for models that don't support it.
+            if provider == "openrouter":
+                serialised["cache_control"] = _cache_control_block(ttl)
+            elif isinstance(message.content, str):
                 serialised["content"] = [
                     {
                         "type": "text",
                         "text": message.content,
-                        "cache_control": {"type": "ephemeral"},
+                        "cache_control": _cache_control_block(ttl),
                     }
                 ]
             result.append(serialised)
         return result
+
+    def _serialize_tools(
+        self, tools: Optional[list[Any]], provider: str, params: Optional[Any] = None
+    ) -> Optional[list[dict[str, Any]]]:
+        if not tools:
+            return None
+        serialised = [t.model_dump(exclude_none=True) for t in tools]
+        auto, targets, ttl = self._cache_options_state(provider, params)
+        if auto and "tools" in targets:
+            # Anthropic allows one cache_control breakpoint per tool list; LiteLLM
+            # accepts it as a top-level key on the last tool dict for both the direct
+            # Anthropic transform and (for supported models) OpenRouter's passthrough.
+            serialised[-1]["cache_control"] = _cache_control_block(ttl)
+        return serialised
 
     def _extract_usage(self, raw: Any) -> UsageBlock:
         raw_usage = getattr(raw, "usage", None)
@@ -390,9 +438,13 @@ class LiteLLMTransport(BaseLLMProvider):
 
         if getattr(raw_usage, "prompt_tokens_details", None):
             cache_read = getattr(raw_usage.prompt_tokens_details, "cached_tokens", 0) or 0
+            cache_write = getattr(raw_usage.prompt_tokens_details, "cache_write_tokens", 0) or 0
 
+        # Anthropic's direct transport reports these as top-level attributes;
+        # OpenRouter (and other OpenAI-shaped providers) nest them under
+        # prompt_tokens_details instead (checked above) — prefer whichever is present.
         cache_read = getattr(raw_usage, "cache_read_input_tokens", cache_read) or cache_read
-        cache_write = getattr(raw_usage, "cache_creation_input_tokens", 0) or 0
+        cache_write = getattr(raw_usage, "cache_creation_input_tokens", cache_write) or cache_write
 
         return UsageBlock(
             input_tokens=getattr(raw_usage, "prompt_tokens", 0) or 0,
@@ -463,7 +515,7 @@ class LiteLLMTransport(BaseLLMProvider):
         self, request: NormalisedLLMRequest, key: TenantKeyPayload
     ) -> ChatResponse:
         model_str = self._model_string(request.provider, request.model)
-        messages = self._serialize_messages(request.messages, request.provider)
+        messages = self._serialize_messages(request.messages, request.provider, request.params)
         credential_kwargs = self._credential_kwargs(key)
         param_kwargs = self._param_kwargs(request.params)
 
@@ -474,8 +526,9 @@ class LiteLLMTransport(BaseLLMProvider):
                 credential_kwargs["api_base"] = self._regions[0]
 
         tool_kwargs: dict[str, Any] = {}
-        if request.tools:
-            tool_kwargs["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
+        serialised_tools = self._serialize_tools(request.tools, request.provider, request.params)
+        if serialised_tools is not None:
+            tool_kwargs["tools"] = serialised_tools
         if request.tool_choice is not None:
             tool_kwargs["tool_choice"] = request.tool_choice
 
@@ -530,7 +583,7 @@ class LiteLLMTransport(BaseLLMProvider):
         self, request: NormalisedLLMRequest, key: TenantKeyPayload
     ) -> AsyncIterator[StreamEvent]:
         model_str = self._model_string(request.provider, request.model)
-        messages = self._serialize_messages(request.messages, request.provider)
+        messages = self._serialize_messages(request.messages, request.provider, request.params)
         credential_kwargs = self._credential_kwargs(key)
         param_kwargs = self._param_kwargs(request.params)
 
@@ -541,8 +594,9 @@ class LiteLLMTransport(BaseLLMProvider):
                 credential_kwargs["api_base"] = self._regions[0]
 
         tool_kwargs: dict[str, Any] = {}
-        if request.tools:
-            tool_kwargs["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
+        serialised_tools = self._serialize_tools(request.tools, request.provider, request.params)
+        if serialised_tools is not None:
+            tool_kwargs["tools"] = serialised_tools
         if request.tool_choice is not None:
             tool_kwargs["tool_choice"] = request.tool_choice
 

@@ -2,6 +2,8 @@
 
 The gateway caches LLM responses in Redis so that identical requests return instantly without spending tokens or hitting a provider.
 
+> This page is about the gateway's own Redis response cache (`our_cache_hit`). For provider-side prompt caching (Anthropic's `cache_control`, `params.cache_options`, `upstream_prompt_cache_hit`) — a separate, orthogonal mechanism — see [Provider Layer → Prompt caching](providers.md#prompt-caching).
+
 ---
 
 ## Why the cache exists

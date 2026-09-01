@@ -1,6 +1,6 @@
 from __future__ import annotations
 from typing import Any, Literal, Optional
-from pydantic import BaseModel, ConfigDict, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from src.shared.schemas.envelope import CostBlock, GuardrailsBlock, LatencyBlock, PolicyBlock
 
 # Single source of truth for provider-side prompt-cache capability, consumed by
@@ -83,12 +83,21 @@ class CacheOptions(BaseModel):
         return value
 
 
+RETRY_MAX_ATTEMPTS_CEILING = 10
+RETRY_BACKOFF_BASE_S_CEILING = 60.0
+
+
 class RetryOptions(BaseModel):
-    """Per-request override of the service-wide retry defaults (Settings.llm_retry_*)."""
+    """Per-request override of the service-wide retry defaults (Settings.llm_retry_*).
+
+    max_attempts=0 (or negative) would skip the upstream call in LiteLLMTransport's
+    retry loop entirely, crashing further down instead of erroring cleanly — 1 is
+    the floor. Ceilings cap how long a request can hold a worker retrying.
+    """
 
     enabled: Optional[bool] = None
-    max_attempts: Optional[int] = None
-    backoff_base_s: Optional[float] = None
+    max_attempts: Optional[int] = Field(default=None, ge=1, le=RETRY_MAX_ATTEMPTS_CEILING)
+    backoff_base_s: Optional[float] = Field(default=None, ge=0.0, le=RETRY_BACKOFF_BASE_S_CEILING)
 
 
 class ChatParams(BaseModel):

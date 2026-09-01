@@ -81,7 +81,7 @@ One row per upstream LLM call. The audit log for every request — tokens, cost,
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | `uuid` (PK) | UUID primary key. |
-| `request_id` | `string` (unique) | Client-supplied or gateway-generated idempotency key. Idempotent inserts use `ON CONFLICT DO NOTHING`. |
+| `request_id` | `string` (unique) | Client-supplied (`X-Request-Id`) or gateway-generated correlation id. The unique constraint is not a strict idempotency guarantee — a collision from an unrelated call (the underlying provider call, if any, has already happened by the time a collision is detected) is retried once under a disambiguated `<request_id>:dup:<suffix>` id rather than dropped, so a real request never loses its audit row. |
 | `tenant_id` | `string` (FK) | Owning tenant. |
 | `created_at` | `timestamptz` | Row creation timestamp (UTC). |
 | `provider` | `string` | e.g. `anthropic`, `openai`, `bedrock`. |

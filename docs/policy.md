@@ -83,7 +83,14 @@ if spent >= policy.budget_usd_monthly:
 
 Sums `our_cost_usd` from `ledger_entries` for the current calendar month. If the tenant has already hit or exceeded their budget → `429`. This uses the computed cost from the pricing YAML, not the provider-reported figure.
 
-This check is only as accurate as the ledger write path — every successful, cache-hit, and errored request writes a row (see [Database Models → ledger_entries](models.md#ledger_entries)), including `our_cost_usd=0` rows for cache hits, so cached requests don't inflate spend. A ledger write failure is logged but non-fatal (it never blocks the response), which means it's also invisible to this SUM — a rare dropped write undercounts spend for that month rather than blocking the tenant.
+This check is only as accurate as the ledger write path — every successful, cache-hit, and errored request writes a row (see [Database Models → ledger_entries](models.md#ledger_entries)), including `our_cost_usd=0` rows for cache hits, so cached requests don't inflate spend. `request_id` (the client-supplied `X-Request-Id`) collisions don't drop a row either — the underlying provider call already happened by the time a collision is detected, so the write is retried once under a disambiguated id rather than treated as an already-recorded duplicate. A ledger write failure is logged but non-fatal (it never blocks the response), which means a genuine, non-retryable DB failure is also invisible to this SUM — a rare dropped write undercounts spend for that month rather than blocking the tenant.
+
+**`budget_usd_monthly` is a best-effort, soft ceiling — not an atomic hard cap.** The check reads `SUM(our_cost_usd)` *before* the provider call; the current request's own cost is only written to the ledger *after* it completes. There is no reservation step and no locking, so:
+
+- Two concurrent requests near the cap can both pass the check (neither's cost is recorded yet), both call the provider, and combined spend can land past the budget.
+- A tenant can overshoot their monthly budget by roughly the cost of whatever's in flight at the moment they cross it — the check stops *further* requests once the ledger catches up, it doesn't prevent a brief overshoot.
+
+If you need a hard, atomic ceiling (e.g. reserve the estimated cost off `params.max_tokens` before dispatch, settle with actual usage after, backed by an atomic per-tenant counter instead of a `SUM()` over historical rows), that's a separate piece of work — this check as implemented is a spend-limiting guardrail, not a billing-grade enforcement mechanism.
 
 ---
 

@@ -7,6 +7,7 @@ from typing import Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.llm_service.api.deps import (
@@ -74,39 +75,62 @@ async def _write_ledger_entry(
     our_cache_hit: bool = False, guardrail_flags: Optional[dict] = None,
     provider_reported_usage: Optional[dict] = None,
 ) -> None:
-    """Write one audit row to ledger_entries. Idempotent on request_id — a duplicate write
-    (e.g. a retried call with a client-supplied idempotency key) is silently ignored."""
-    entry = LedgerEntry(
-        request_id=request_id,
-        tenant_id=tenant_id,
-        provider=provider,
-        model=model,
-        transport=Transport.LITELLM,
-        feature=feature,
-        tokens_in=usage.input_tokens if usage else 0,
-        tokens_out=usage.output_tokens if usage else 0,
-        input_tokens_cache_write=usage.input_tokens_cache_write if usage else None,
-        input_tokens_cache_read=usage.input_tokens_cache_read if usage else None,
-        upstream_prompt_cache_hit=((usage.input_tokens_cache_read or 0) > 0) if usage else None,
-        our_cost_usd=cost.computed_usd if cost else 0.0,
-        pricing_version=cost.pricing_version if cost else 0,
-        provider_reported_usage=provider_reported_usage,
-        provider_reported_cost_usd=cost.provider_reported_usd if cost else None,
-        latency_ms=latency_ms,
-        time_to_first_token_ms=time_to_first_token_ms,
-        status=status,
-        error_code=error_code,
-        our_cache_hit=our_cache_hit,
-        batched=False,
-        guardrail_flags=guardrail_flags,
-    )
-    # Non-fatal by design (see docs/architecture.md pipeline step 9): the response has
-    # already been produced, so a ledger write failure must never turn it into a 500.
-    db.add(entry)
+    """Write one audit row to ledger_entries.
+
+    Non-fatal by design (see docs/architecture.md pipeline step 9): the response has
+    already been produced, so a ledger write failure must never turn it into a 500.
+
+    request_id is client-supplied (X-Request-Id) and only unique per genuine retry of
+    the same call — by the time we get here, this request's own provider call (if any)
+    has already happened and was already billed. A request_id collision from an
+    unrelated call (client bug, or a reused header) must not silently drop this row,
+    so on a unique-constraint violation we retry once with a disambiguated id rather
+    than treating it as an already-recorded duplicate.
+    """
+    def _build_entry(entry_request_id: str) -> LedgerEntry:
+        return LedgerEntry(
+            request_id=entry_request_id,
+            tenant_id=tenant_id,
+            provider=provider,
+            model=model,
+            transport=Transport.LITELLM,
+            feature=feature,
+            tokens_in=usage.input_tokens if usage else 0,
+            tokens_out=usage.output_tokens if usage else 0,
+            input_tokens_cache_write=usage.input_tokens_cache_write if usage else None,
+            input_tokens_cache_read=usage.input_tokens_cache_read if usage else None,
+            upstream_prompt_cache_hit=((usage.input_tokens_cache_read or 0) > 0) if usage else None,
+            our_cost_usd=cost.computed_usd if cost else 0.0,
+            pricing_version=cost.pricing_version if cost else 0,
+            provider_reported_usage=provider_reported_usage,
+            provider_reported_cost_usd=cost.provider_reported_usd if cost else None,
+            latency_ms=latency_ms,
+            time_to_first_token_ms=time_to_first_token_ms,
+            status=status,
+            error_code=error_code,
+            our_cache_hit=our_cache_hit,
+            batched=False,
+            guardrail_flags=guardrail_flags,
+        )
+
+    db.add(_build_entry(request_id))
+    try:
+        await db.commit()
+        return
+    except IntegrityError as exc:
+        await db.rollback()
+        print(f"[ledger] request_id={request_id} collided with an existing row, retrying with a disambiguated id: {exc!r}")
+    except Exception as exc:
+        print(f"[ledger] write failed for request_id={request_id}: {exc!r}")
+        await db.rollback()
+        return
+
+    disambiguated_id = f"{request_id}:dup:{uuid.uuid4().hex[:8]}"
+    db.add(_build_entry(disambiguated_id))
     try:
         await db.commit()
     except Exception as exc:
-        print(f"[ledger] write failed for request_id={request_id}: {exc!r}")
+        print(f"[ledger] retry write failed for request_id={disambiguated_id}: {exc!r}")
         await db.rollback()
 
 

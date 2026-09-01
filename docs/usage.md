@@ -86,7 +86,7 @@ Returns the full response in one go.
 | `read_timeout` | `float` | Seconds to wait for the upstream to return data after connecting. |
 | `web_search_options` | `object` | Enable web search. Fields: `search_context_size` (`string`), `user_location` (`object`). Provider-specific. |
 | `cache_options` | `object` | Opt-in automatic provider-side prompt caching. Fields: `enabled` (`bool`), `ttl` (`string`, `"5m"` or `"1h"`), `targets` (`string[]`, `"prompt"` and/or `"tools"`). See [Provider Layer → Prompt caching](providers.md#prompt-caching); current supported values are also served live at `GET /v1/cache/options`. |
-| `retry` | `object` | Per-request override of the service-wide retry defaults. Fields: `enabled` (`bool` — `false` forces a single attempt, no retry), `max_attempts` (`int`), `backoff_base_s` (`float`, seconds). Only applies to the fixed set of retryable upstream error types (timeouts, rate limits, 5xx) — a non-retryable error (e.g. an invalid model ID) still fails on the first attempt regardless of these values. See [Provider Layer → LiteLLMTransport](providers.md#litellmtransport). |
+| `retry` | `object` | Per-request override of the service-wide retry defaults. Fields: `enabled` (`bool` — `false` forces a single attempt, no retry), `max_attempts` (`int`, `1`–`10`), `backoff_base_s` (`float`, seconds, `0`–`60`) — out-of-range values are rejected with `422`, not clamped. Only applies to the fixed set of retryable upstream error types (timeouts, rate limits, 5xx) — a non-retryable error (e.g. an invalid model ID) still fails on the first attempt regardless of these values. See [Provider Layer → LiteLLMTransport](providers.md#litellmtransport). |
 
 **Tool definition fields**
 

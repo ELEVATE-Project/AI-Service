@@ -98,13 +98,15 @@ Attempt count and backoff default to `LLM_RETRY_MAX_ATTEMPTS` / `LLM_RETRY_BACKO
 }
 ```
 
-| Field | Type | Default when omitted |
-|-------|------|-----------------------|
-| `enabled` | `bool` | service default (retries on) — set `false` to force a single attempt, no retry |
-| `max_attempts` | `int` | `LLM_RETRY_MAX_ATTEMPTS` |
-| `backoff_base_s` | `float` | `LLM_RETRY_BACKOFF_BASE_S` |
+| Field | Type | Bounds | Default when omitted |
+|-------|------|--------|-----------------------|
+| `enabled` | `bool` | — | service default (retries on) — set `false` to force a single attempt, no retry |
+| `max_attempts` | `int` | `1`–`10` | `LLM_RETRY_MAX_ATTEMPTS` |
+| `backoff_base_s` | `float` | `0`–`60` | `LLM_RETRY_BACKOFF_BASE_S` |
 
 `enabled: false` always wins over `max_attempts`. Omitting `enabled` (or passing `true`) does not itself force retries where the error type isn't retryable — it only supplies attempt count/backoff to be used *if* the error is one of the types above.
+
+`max_attempts` and `backoff_base_s` are validated at the schema boundary (`422` if out of range) rather than merely clamped — `max_attempts: 0` would leave the retry loop's upstream response as `None` and crash further down rather than making a clean call, and an unbounded `max_attempts` would let a single request hold a worker retrying indefinitely and hammer the upstream provider.
 
 **Error wrapping:** LiteLLM exceptions are caught and converted to `UpstreamTransportError` with a structured `code`:
 

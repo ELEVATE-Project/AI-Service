@@ -41,9 +41,11 @@ Returns the full response in one go.
     "connect_timeout": null,
     "read_timeout": null,
     "web_search_options": null,
-    "cache_options": null
+    "cache_options": null,
+    "retry": null
   },
-  "metadata": {}
+  "metadata": {},
+  "use_defaults": false
 }
 ```
 
@@ -51,14 +53,15 @@ Returns the full response in one go.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `provider` | `string` | Yes | `anthropic`, `openai`, `bedrock`, `groq`, `openrouter`, `custom_endpoint` |
-| `model` | `string` | Yes | Model ID as the provider uses it, e.g. `claude-sonnet-4-5`. For `openrouter`, use the OpenRouter slug, e.g. `openai/gpt-4o` or `anthropic/claude-3.5-sonnet`. |
+| `provider` | `string` | Conditionally | `anthropic`, `openai`, `bedrock`, `groq`, `openrouter`, `custom_endpoint`. Omit only when `use_defaults: true` and the tenant has a `default_provider` configured — otherwise required. |
+| `model` | `string` | Conditionally | Model ID as the provider uses it, e.g. `claude-sonnet-4-5`. For `openrouter`, use the OpenRouter slug, e.g. `openai/gpt-4o` or `anthropic/claude-3.5-sonnet`. Omit only when `use_defaults: true` and the tenant has a `default_model` configured — otherwise required. |
 | `messages` | `Message[]` | Yes | Conversation history. See message fields below. |
 | `tools` | `Tool[]` | No | Function definitions the model can call |
 | `tool_choice` | `string \| object` | No | `"auto"`, `"none"`, `"required"`, or `{"type":"function","function":{"name":"..."}}` |
 | `params` | `ChatParams` | No | Inference parameters. All fields optional. |
 | `metadata` | `object` | No | Free-form. Pass `{"batch": true}` to submit asynchronously. Not sent upstream. |
 | `provider_options` | `object` | No | Provider-specific passthrough. Consumed only for `provider: "openrouter"` — keys: `provider` (routing prefs), `models` (fallback list), `plugins` (e.g. web search), `referer` / `title` (app attribution). See [Provider Layer → OpenRouter](providers.md#openrouter). |
+| `use_defaults` | `bool` | No | `false`/omitted (default): `provider`/`model` are required as usual — today's behavior, unchanged. `true`: opts into filling, field-by-field, any of `provider`, `model`, or individual `params` fields the request left unset from the tenant's `tenant_defaults` row, if one exists. Defaults only fill gaps — any field the request *does* set (including a single `params` field like `max_tokens` while leaving `temperature` unset) is never overridden. See [Tenants → Tenant Defaults](auth-and-tenants.md) for the merge rule and a worked example. |
 
 **Message fields**
 
@@ -83,6 +86,7 @@ Returns the full response in one go.
 | `read_timeout` | `float` | Seconds to wait for the upstream to return data after connecting. |
 | `web_search_options` | `object` | Enable web search. Fields: `search_context_size` (`string`), `user_location` (`object`). Provider-specific. |
 | `cache_options` | `object` | Opt-in automatic provider-side prompt caching. Fields: `enabled` (`bool`), `ttl` (`string`, `"5m"` or `"1h"`), `targets` (`string[]`, `"prompt"` and/or `"tools"`). See [Provider Layer → Prompt caching](providers.md#prompt-caching); current supported values are also served live at `GET /v1/cache/options`. |
+| `retry` | `object` | Per-request override of the service-wide retry defaults. Fields: `enabled` (`bool` — `false` forces a single attempt, no retry), `max_attempts` (`int`), `backoff_base_s` (`float`, seconds). Only applies to the fixed set of retryable upstream error types (timeouts, rate limits, 5xx) — a non-retryable error (e.g. an invalid model ID) still fails on the first attempt regardless of these values. See [Provider Layer → LiteLLMTransport](providers.md#litellmtransport). |
 
 **Tool definition fields**
 

@@ -83,6 +83,8 @@ if spent >= policy.budget_usd_monthly:
 
 Sums `our_cost_usd` from `ledger_entries` for the current calendar month. If the tenant has already hit or exceeded their budget → `429`. This uses the computed cost from the pricing YAML, not the provider-reported figure.
 
+This check is only as accurate as the ledger write path — every successful, cache-hit, and errored request writes a row (see [Database Models → ledger_entries](models.md#ledger_entries)), including `our_cost_usd=0` rows for cache hits, so cached requests don't inflate spend. A ledger write failure is logged but non-fatal (it never blocks the response), which means it's also invisible to this SUM — a rare dropped write undercounts spend for that month rather than blocking the tenant.
+
 ---
 
 ## Error response

@@ -113,6 +113,42 @@ class TenantKey(Base):
     )
 
 
+class TenantDefaults(Base):
+    """Per-tenant defaults for provider/model/params, applied by the normaliser when a
+    request opts in via ChatRequest.use_defaults and omits the corresponding field."""
+
+    __tablename__ = "tenant_defaults"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4,
+        comment="UUID primary key.",
+    )
+    tenant_id: Mapped[str] = mapped_column(
+        String, ForeignKey("tenants.id"), nullable=False, unique=True,
+        comment="FK to tenants.id. One defaults row per tenant.",
+    )
+    default_provider: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True,
+        comment="Provider to use when the request omits provider and opts into defaults.",
+    )
+    default_model: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True,
+        comment="Model to use when the request omits model and opts into defaults.",
+    )
+    default_params: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=True,
+        comment="ChatParams-shaped dict merged into the request for any field the request omits.",
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False,
+        comment="Row creation timestamp (UTC).",
+    )
+    updated_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), onupdate=func.now(), nullable=True,
+        comment="Last modification timestamp (UTC). Null until the first update.",
+    )
+
+
 class LedgerEntry(Base):
     """One row per upstream LLM call. Stores both our computed cost and the raw provider usage for audit."""
 

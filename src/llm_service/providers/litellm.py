@@ -51,7 +51,24 @@ def _should_retry(error: Exception) -> bool:
     return isinstance(error, _RETRYABLE_ERRORS)
 
 
-def _retry_delay(error: Exception, attempt: int) -> float:
+def _retry_settings(request: NormalisedLLMRequest) -> tuple[int, float]:
+    """Resolve (max_attempts, backoff_base_s), applying a per-request retry override
+    (request.params.retry) on top of the service-wide defaults in Settings."""
+    retry_opts = request.params.retry if request.params else None
+    if retry_opts and retry_opts.enabled is False:
+        return 1, settings.llm_retry_backoff_base_s
+    max_attempts = (
+        retry_opts.max_attempts if retry_opts and retry_opts.max_attempts is not None
+        else settings.llm_retry_max_attempts
+    )
+    backoff_base_s = (
+        retry_opts.backoff_base_s if retry_opts and retry_opts.backoff_base_s is not None
+        else settings.llm_retry_backoff_base_s
+    )
+    return max_attempts, backoff_base_s
+
+
+def _retry_delay(error: Exception, attempt: int, backoff_base_s: float) -> float:
     """Return how long to sleep before the next attempt.
     For rate limits, respect the provider's Retry-After header if present. Otherwise use exponential backoff with jitter.
     """
@@ -69,7 +86,7 @@ def _retry_delay(error: Exception, attempt: int) -> float:
                         if dt.tzinfo is None:
                             dt = dt.replace(tzinfo=timezone.utc)
                         return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
-    return settings.llm_retry_backoff_base_s * (2 ** attempt) + random.uniform(0, 0.5)
+    return backoff_base_s * (2 ** attempt) + random.uniform(0, 0.5)
 
 
 def _upstream_status(error: Exception) -> Optional[int]:
@@ -540,7 +557,8 @@ class LiteLLMTransport(BaseLLMProvider):
         openrouter_kwargs = self._openrouter_kwargs(request)
 
         raw = None
-        for attempt in range(settings.llm_retry_max_attempts):
+        max_attempts, backoff_base_s = _retry_settings(request)
+        for attempt in range(max_attempts):
             try:
                 raw = await litellm.acompletion(
                     model=model_str, messages=messages, drop_params=True,
@@ -550,9 +568,9 @@ class LiteLLMTransport(BaseLLMProvider):
                 break
             except Exception as error:
                 print(f"[litellm.chat] attempt={attempt} error_type={type(error).__name__} error={error}")
-                if not _should_retry(error) or attempt == settings.llm_retry_max_attempts - 1:
+                if not _should_retry(error) or attempt == max_attempts - 1:
                     raise _wrap_litellm_error(error) from error
-                await asyncio.sleep(_retry_delay(error, attempt))
+                await asyncio.sleep(_retry_delay(error, attempt, backoff_base_s))
 
         usage = self._extract_usage(raw)
         choices = self._map_choices(raw)
@@ -609,7 +627,8 @@ class LiteLLMTransport(BaseLLMProvider):
 
         # Retry connection setup before any tokens are sent to the caller.
         response_stream = None
-        for attempt in range(settings.llm_retry_max_attempts):
+        max_attempts, backoff_base_s = _retry_settings(request)
+        for attempt in range(max_attempts):
             try:
                 response_stream = await litellm.acompletion(
                     model=model_str,
@@ -625,7 +644,7 @@ class LiteLLMTransport(BaseLLMProvider):
                 )
                 break
             except Exception as error:
-                if not _should_retry(error) or attempt == settings.llm_retry_max_attempts - 1:
+                if not _should_retry(error) or attempt == max_attempts - 1:
                     upstream_error = _wrap_litellm_error(error)
                     yield StreamEvent(
                         type="error",
@@ -636,7 +655,7 @@ class LiteLLMTransport(BaseLLMProvider):
                         ),
                     )
                     return
-                await asyncio.sleep(_retry_delay(error, attempt))
+                await asyncio.sleep(_retry_delay(error, attempt, backoff_base_s))
 
         final_usage = UsageBlock()
         final_finish_reason = "stop"

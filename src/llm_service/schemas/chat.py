@@ -83,6 +83,14 @@ class CacheOptions(BaseModel):
         return value
 
 
+class RetryOptions(BaseModel):
+    """Per-request override of the service-wide retry defaults (Settings.llm_retry_*)."""
+
+    enabled: Optional[bool] = None
+    max_attempts: Optional[int] = None
+    backoff_base_s: Optional[float] = None
+
+
 class ChatParams(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
@@ -93,11 +101,12 @@ class ChatParams(BaseModel):
     read_timeout: Optional[float] = None
     web_search_options: Optional[WebSearchOptions] = None
     cache_options: Optional[CacheOptions] = None
+    retry: Optional[RetryOptions] = None
 
 
 class ChatRequest(BaseModel):
-    provider: str
-    model: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
     messages: list[MessageParam]
     tools: Optional[list[Tool]] = None
     tool_choice: Optional[Any] = None
@@ -109,6 +118,9 @@ class ChatRequest(BaseModel):
     #   plugins  — OpenRouter plugins (e.g. web search)
     #   referer / title — per-request app-attribution overrides
     provider_options: Optional[dict[str, Any]] = None
+    # Opt-in only: omitted/False leaves provider/model required as before. True makes the
+    # normaliser look up the tenant's TenantDefaults row and fill in whatever the request omitted.
+    use_defaults: Optional[bool] = None
 
 
 class NormalisedLLMRequest(BaseModel):

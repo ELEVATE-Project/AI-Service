@@ -33,9 +33,10 @@
   │  └───────────────────┬──────────────────────────┘  │
   │                      │                             │
   │  ┌───────────────────▼──────────────────────────┐  │
-  │  │            Request Normaliser                │  │
-  │  │  ChatRequest → NormalisedLLMRequest          │  │
-  │  │  Merge request fields · inject cache hints   │  │
+  │  │            Request Normaliser                │  │◄── (use_defaults=true) ──► Postgres
+  │  │  ChatRequest → NormalisedLLMRequest          │  │      tenant_defaults
+  │  │  fills unset provider/model/params fields    │  │
+  │  │  from tenant_defaults, opt-in per request     │  │
   │  └───────────────────┬──────────────────────────┘  │
   │                      │                             │
   │  ┌───────────────────▼──────────────────────────┐  │
@@ -72,7 +73,8 @@
   │  ┌───────────────────▼──────────────────────────┐  │
   │  │              Usage Ledger                    │  │
   │  │  YAML-computed cost + provider-reported JSONB│  │──── write ledger row ──► Postgres
-  │  │  asyncpg insert                              │  │
+  │  │  SQLAlchemy AsyncSession · non-fatal on write │  │
+  │  │  failure (response already produced)         │  │
   │  └───────────────────┬──────────────────────────┘  │
   │                      │                             │
   │  ┌───────────────────▼──────────────────────────┐  │
@@ -181,9 +183,9 @@ Shares the same auth, ledger, and guardrails infrastructure as the LLM module.
 | 3 | Request Normaliser | `400` missing provider or model |
 | 4 | Policy Engine | `429 policy_exceeded` |
 | 5 | Guardrails — input | `400 guardrails_blocked` |
-| 6 | Exact-Match Cache | cache hit → return immediately |
+| 6 | Exact-Match Cache | cache hit → ledger row written (`our_cache_hit=true`, zero cost), then return immediately, skipping steps 7-8 |
 | 7 | Routing Registry + BYOK key load | `422 missing_tenant_key` |
-| 8 | Transport (LiteLLM or direct) | `502` / `504` upstream errors |
-| 9 | Usage Ledger write | non-fatal — response still returned on failure |
+| 8 | Transport (LiteLLM or direct) | `502` / `504` upstream errors — a ledger row is written first (`status=error`) |
+| 9 | Usage Ledger write | non-fatal — response still returned on failure (failure is logged, not raised) |
 | 10 | Guardrails — output | `400 guardrails_blocked` |
 | 11 | Cache write + Langfuse trace | non-fatal |

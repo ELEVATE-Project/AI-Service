@@ -88,7 +88,23 @@ raw = await litellm.acompletion(
 )
 ```
 
-**Retry logic:** retries on `Timeout`, `ServiceUnavailableError`, `APIConnectionError`, `InternalServerError`, and `RateLimitError`. Configurable via `LLM_RETRY_MAX_ATTEMPTS` and `LLM_RETRY_BACKOFF_BASE_S`. For rate limits, respects the upstream `Retry-After` header if present.
+**Retry logic:** retries on `Timeout`, `ServiceUnavailableError`, `APIConnectionError`, `InternalServerError`, and `RateLimitError` — this error-type allowlist is fixed, not configurable. Any other exception (e.g. `BadRequestError` from an invalid model ID) fails on the first attempt regardless of attempt count, since retrying wouldn't change the outcome. For rate limits, respects the upstream `Retry-After` header if present.
+
+Attempt count and backoff default to `LLM_RETRY_MAX_ATTEMPTS` / `LLM_RETRY_BACKOFF_BASE_S`, but a request can override either per call via `params.retry` (see [Usage Guide → params fields](usage.md#post-v1chat)):
+
+```json
+"params": {
+  "retry": { "enabled": true, "max_attempts": 3, "backoff_base_s": 2.0 }
+}
+```
+
+| Field | Type | Default when omitted |
+|-------|------|-----------------------|
+| `enabled` | `bool` | service default (retries on) — set `false` to force a single attempt, no retry |
+| `max_attempts` | `int` | `LLM_RETRY_MAX_ATTEMPTS` |
+| `backoff_base_s` | `float` | `LLM_RETRY_BACKOFF_BASE_S` |
+
+`enabled: false` always wins over `max_attempts`. Omitting `enabled` (or passing `true`) does not itself force retries where the error type isn't retryable — it only supplies attempt count/backoff to be used *if* the error is one of the types above.
 
 **Error wrapping:** LiteLLM exceptions are caught and converted to `UpstreamTransportError` with a structured `code`:
 

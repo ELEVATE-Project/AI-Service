@@ -16,11 +16,19 @@ import secrets
 import sys
 import uuid
 from pathlib import Path
+from typing import Any, Callable
 
 import asyncpg
 import boto3
 import keyring
 from cryptography.fernet import Fernet
+from pydantic import ValidationError
+
+_project_root = Path(__file__).resolve().parents[1]
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+
+from src.llm_service.schemas.chat import ChatParams  # noqa: E402 — needs the sys.path insert above
 
 _KEYRING_SERVICE = "ai-service"
 _KEYRING_KEY = "master-key"
@@ -254,6 +262,71 @@ async def _handle_calling_services(conn: asyncpg.Connection, tenant_id: str) -> 
         grant = _ask_yn(f"\nGrant another calling service access to '{tenant_id}'?")
 
 
+# ── tenant defaults flow ────────────────────────────────────────────────────────
+
+# Only scalar ChatParams fields are settable here — a flat key=value CLI prompt
+# can't sanely build the nested web_search_options / cache_options / retry objects.
+_DEFAULT_PARAM_PARSERS: dict[str, Callable[[str], Any]] = {
+    "temperature": float,
+    "max_tokens": int,
+    "top_p": float,
+    "seed": int,
+    "connect_timeout": float,
+    "read_timeout": float,
+    "stop": lambda raw: [s.strip() for s in raw.split(",") if s.strip()],
+}
+
+
+def _collect_default_params() -> dict[str, Any]:
+    """Free-flow key=value entry, validated against the real ChatParams schema (the
+    same one the API enforces) so a tenant can't be given a default the gateway would
+    reject. Unknown keys or invalid values are rejected in place, re-prompting."""
+    default_params: dict[str, Any] = {}
+    print(f"  Allowed default param keys: {', '.join(sorted(_DEFAULT_PARAM_PARSERS))}")
+    while True:
+        key = _ask("  Param key (press Enter to finish)")
+        if not key:
+            return default_params
+        parser = _DEFAULT_PARAM_PARSERS.get(key)
+        if parser is None:
+            print(f"  '{key}' is not an allowed default param. Allowed: {', '.join(sorted(_DEFAULT_PARAM_PARSERS))}")
+            continue
+        raw_value = _ask(f"  Value for '{key}'")
+        try:
+            parsed_value = parser(raw_value)
+            ChatParams(**{**default_params, key: parsed_value})
+        except (ValueError, ValidationError) as exc:
+            print(f"  '{raw_value}' is not a valid value for '{key}': {exc}")
+            continue
+        default_params[key] = parsed_value
+        print(f"  ✓ {key} = {parsed_value}")
+
+
+async def _handle_tenant_defaults(conn: asyncpg.Connection, tenant_id: str) -> None:
+    if not _ask_yn(f"\nSet defaults for '{tenant_id}' (used when a request opts in with use_defaults=true)?"):
+        return
+
+    print()
+    default_provider = _ask("  Default provider (press Enter to skip)") or None
+    default_model = _ask("  Default model (press Enter to skip)") or None
+    default_params = _collect_default_params()
+
+    await conn.execute(
+        """
+        INSERT INTO tenant_defaults (id, tenant_id, default_provider, default_model, default_params)
+        VALUES ($1, $2, $3, $4, $5::jsonb)
+        ON CONFLICT (tenant_id) DO UPDATE
+            SET default_provider = EXCLUDED.default_provider,
+                default_model = EXCLUDED.default_model,
+                default_params = EXCLUDED.default_params,
+                updated_at = now()
+        """,
+        uuid.uuid4(), tenant_id, default_provider, default_model,
+        json.dumps(default_params) if default_params else None,
+    )
+    print(f"  ✓ Defaults saved for '{tenant_id}'.")
+
+
 # ── main flow ─────────────────────────────────────────────────────────────────
 
 async def _run(db_url: str) -> None:
@@ -276,6 +349,7 @@ async def _run(db_url: str) -> None:
             print(f"  ✓ Tenant '{tenant_id}' ready.")
 
             await _handle_calling_services(conn, tenant_id)
+            await _handle_tenant_defaults(conn, tenant_id)
 
             add_key = _ask_yn(f"\nAdd a provider key for '{tenant_id}'?")
             while add_key:

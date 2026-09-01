@@ -240,7 +240,10 @@ Three invariants every direct adapter must respect:
 
 Anthropic and Bedrock-Anthropic require explicit `cache_control` markers on content
 blocks. If your adapter targets one of these providers, inject the marker when the
-message has a `cache: "ephemeral"` hint:
+message has a `cache: "ephemeral"` hint. (This is the minimal shape; see
+`LiteLLMTransport._serialize_messages`/`_serialize_tools` in `providers/litellm.py`
+for the full implementation, which also supports `params.cache_options` for
+auto-applying the marker and a configurable TTL — see [Provider Layer](providers.md#prompt-caching).)
 
 ```python
 def _serialize_messages(self, messages: list[Any]) -> list[dict]:

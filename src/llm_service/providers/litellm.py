@@ -19,8 +19,8 @@ from src.llm_service.providers.base import (
     BaseLLMProvider, StreamEvent, TransportFinishData, UpstreamTransportError,
 )
 from src.llm_service.schemas.chat import (
-    CacheBlock, ChatResponse, Choice, ChoiceMessage, ErrorData,
-    NormalisedLLMRequest, TokenData, ToolUseData, UsageBlock,
+    CACHE_CAPABLE_PROVIDERS, CACHE_TARGET_DEFAULT, CacheBlock, ChatResponse, Choice,
+    ChoiceMessage, ErrorData, NormalisedLLMRequest, TokenData, ToolUseData, UsageBlock,
 )
 from src.shared.config import settings
 from src.shared.db.enums import BatchJobStatus, KeyFormat, Transport
@@ -30,6 +30,12 @@ from src.shared.secrets.backend import TenantKeyPayload
 
 _PROVIDER_REMAP: dict[str, str] = {
     "custom_endpoint": "http://<endpoint>",
+}
+
+_WEB_SEARCH_CONTEXT_SIZE_TO_MAX_RESULTS: dict[str, int] = {
+    "low": 3,
+    "medium": 5,
+    "high": 8,
 }
 
 _RETRYABLE_ERRORS = (
@@ -45,7 +51,24 @@ def _should_retry(error: Exception) -> bool:
     return isinstance(error, _RETRYABLE_ERRORS)
 
 
-def _retry_delay(error: Exception, attempt: int) -> float:
+def _retry_settings(request: NormalisedLLMRequest) -> tuple[int, float]:
+    """Resolve (max_attempts, backoff_base_s), applying a per-request retry override
+    (request.params.retry) on top of the service-wide defaults in Settings."""
+    retry_opts = request.params.retry if request.params else None
+    if retry_opts and retry_opts.enabled is False:
+        return 1, settings.llm_retry_backoff_base_s
+    max_attempts = (
+        retry_opts.max_attempts if retry_opts and retry_opts.max_attempts is not None
+        else settings.llm_retry_max_attempts
+    )
+    backoff_base_s = (
+        retry_opts.backoff_base_s if retry_opts and retry_opts.backoff_base_s is not None
+        else settings.llm_retry_backoff_base_s
+    )
+    return max_attempts, backoff_base_s
+
+
+def _retry_delay(error: Exception, attempt: int, backoff_base_s: float) -> float:
     """Return how long to sleep before the next attempt.
     For rate limits, respect the provider's Retry-After header if present. Otherwise use exponential backoff with jitter.
     """
@@ -63,7 +86,7 @@ def _retry_delay(error: Exception, attempt: int) -> float:
                         if dt.tzinfo is None:
                             dt = dt.replace(tzinfo=timezone.utc)
                         return max(0.0, (dt - datetime.now(timezone.utc)).total_seconds())
-    return settings.llm_retry_backoff_base_s * (2 ** attempt) + random.uniform(0, 0.5)
+    return backoff_base_s * (2 ** attempt) + random.uniform(0, 0.5)
 
 
 def _upstream_status(error: Exception) -> Optional[int]:
@@ -222,6 +245,13 @@ def _dedupe_leading_narration(raw: Any, flattened_content: Optional[str]) -> Opt
     return final_answer or flattened_content
 
 
+def _cache_control_block(ttl: Optional[str]) -> dict[str, Any]:
+    block: dict[str, Any] = {"type": "ephemeral"}
+    if ttl:
+        block["ttl"] = ttl
+    return block
+
+
 def _extract_response_cost(raw: Any) -> Optional[float]:
     """Best-effort provider-reported response cost in USD.
 
@@ -308,9 +338,15 @@ class LiteLLMTransport(BaseLLMProvider):
     def _openrouter_kwargs(self, request: NormalisedLLMRequest) -> dict[str, Any]:
         """Map provider_options to LiteLLM extra_body / extra_headers for OpenRouter.
 
-        OpenRouter reads routing prefs (``provider``) and a fallback list
-        (``models``) from the request body, and app attribution from the
+        OpenRouter reads routing prefs (``provider``), a fallback list
+        (``models``), and plugin config (``plugins``, e.g. the web search
+        plugin) from the request body, and app attribution from the
         HTTP-Referer / X-Title headers. Returns {} for any other provider.
+
+        If the caller set the provider-agnostic ``params.web_search_options``
+        but didn't already pass an explicit ``plugins`` override, the web
+        search plugin is synthesised automatically so callers don't need to
+        know OpenRouter's plugin format.
         """
         if request.provider != "openrouter":
             return {}
@@ -321,6 +357,14 @@ class LiteLLMTransport(BaseLLMProvider):
             extra_body["provider"] = options["provider"]
         if options.get("models") is not None:
             extra_body["models"] = options["models"]
+        if options.get("plugins") is not None:
+            extra_body["plugins"] = options["plugins"]
+        elif request.params is not None and request.params.web_search_options is not None:
+            web_plugin: dict[str, Any] = {"id": "web"}
+            context_size = request.params.web_search_options.search_context_size
+            if context_size in _WEB_SEARCH_CONTEXT_SIZE_TO_MAX_RESULTS:
+                web_plugin["max_results"] = _WEB_SEARCH_CONTEXT_SIZE_TO_MAX_RESULTS[context_size]
+            extra_body["plugins"] = [web_plugin]
 
         referer = options.get("referer") or settings.openrouter_app_url
         title = options.get("title") or settings.openrouter_app_title
@@ -337,28 +381,69 @@ class LiteLLMTransport(BaseLLMProvider):
             kwargs["extra_headers"] = extra_headers
         return kwargs
 
+    def _cache_options_state(
+        self, provider: str, params: Optional[Any]
+    ) -> tuple[bool, set[str], Optional[str]]:
+        """Resolve (auto_enabled, targets, ttl) for provider-side prompt caching.
+
+        ``auto_enabled`` is False whenever the provider doesn't support prompt
+        caching at all, regardless of what the caller asked for.
+        """
+        cache_options = getattr(params, "cache_options", None) if params else None
+        if provider not in CACHE_CAPABLE_PROVIDERS or not cache_options or not cache_options.enabled:
+            return False, set(), (cache_options.ttl if cache_options else None)
+        targets = set(cache_options.targets) if cache_options.targets else set(CACHE_TARGET_DEFAULT)
+        return True, targets, cache_options.ttl
+
     def _serialize_messages(
-        self, messages: list[Any], provider: str
+        self, messages: list[Any], provider: str, params: Optional[Any] = None
     ) -> list[dict[str, Any]]:
+        auto, targets, ttl = self._cache_options_state(provider, params)
+        auto_prompt = auto and "prompt" in targets
+        last_system_idx = None
+        if auto_prompt:
+            for i, message in enumerate(messages):
+                if message.role == "system":
+                    last_system_idx = i
+
         result: list[dict[str, Any]] = []
-        for message in messages:
+        for i, message in enumerate(messages):
             serialised = message.model_dump(exclude={"cache"}, exclude_none=True)
-            # Anthropic requires explicit cache_control blocks for prompt caching;
-            # LiteLLM forwards them unchanged when present.
-            if (
-                provider in ("anthropic", "bedrock")
-                and message.cache == "ephemeral"
-                and isinstance(message.content, str)
-            ):
+            should_cache = message.cache == "ephemeral" or i == last_system_idx
+            if not should_cache or provider not in CACHE_CAPABLE_PROVIDERS:
+                result.append(serialised)
+                continue
+
+            # Anthropic (direct/Bedrock) requires cache_control nested in a content
+            # block; OpenRouter takes it as a top-level key and relocates it itself
+            # (litellm/llms/openrouter/chat/transformation.py:_move_cache_control_to_content),
+            # silently dropping it for models that don't support it.
+            if provider == "openrouter":
+                serialised["cache_control"] = _cache_control_block(ttl)
+            elif isinstance(message.content, str):
                 serialised["content"] = [
                     {
                         "type": "text",
                         "text": message.content,
-                        "cache_control": {"type": "ephemeral"},
+                        "cache_control": _cache_control_block(ttl),
                     }
                 ]
             result.append(serialised)
         return result
+
+    def _serialize_tools(
+        self, tools: Optional[list[Any]], provider: str, params: Optional[Any] = None
+    ) -> Optional[list[dict[str, Any]]]:
+        if not tools:
+            return None
+        serialised = [t.model_dump(exclude_none=True) for t in tools]
+        auto, targets, ttl = self._cache_options_state(provider, params)
+        if auto and "tools" in targets:
+            # Anthropic allows one cache_control breakpoint per tool list; LiteLLM
+            # accepts it as a top-level key on the last tool dict for both the direct
+            # Anthropic transform and (for supported models) OpenRouter's passthrough.
+            serialised[-1]["cache_control"] = _cache_control_block(ttl)
+        return serialised
 
     def _extract_usage(self, raw: Any) -> UsageBlock:
         raw_usage = getattr(raw, "usage", None)
@@ -370,9 +455,13 @@ class LiteLLMTransport(BaseLLMProvider):
 
         if getattr(raw_usage, "prompt_tokens_details", None):
             cache_read = getattr(raw_usage.prompt_tokens_details, "cached_tokens", 0) or 0
+            cache_write = getattr(raw_usage.prompt_tokens_details, "cache_write_tokens", 0) or 0
 
+        # Anthropic's direct transport reports these as top-level attributes;
+        # OpenRouter (and other OpenAI-shaped providers) nest them under
+        # prompt_tokens_details instead (checked above) — prefer whichever is present.
         cache_read = getattr(raw_usage, "cache_read_input_tokens", cache_read) or cache_read
-        cache_write = getattr(raw_usage, "cache_creation_input_tokens", 0) or 0
+        cache_write = getattr(raw_usage, "cache_creation_input_tokens", cache_write) or cache_write
 
         return UsageBlock(
             input_tokens=getattr(raw_usage, "prompt_tokens", 0) or 0,
@@ -443,7 +532,7 @@ class LiteLLMTransport(BaseLLMProvider):
         self, request: NormalisedLLMRequest, key: TenantKeyPayload
     ) -> ChatResponse:
         model_str = self._model_string(request.provider, request.model)
-        messages = self._serialize_messages(request.messages, request.provider)
+        messages = self._serialize_messages(request.messages, request.provider, request.params)
         credential_kwargs = self._credential_kwargs(key)
         param_kwargs = self._param_kwargs(request.params)
 
@@ -454,8 +543,9 @@ class LiteLLMTransport(BaseLLMProvider):
                 credential_kwargs["api_base"] = self._regions[0]
 
         tool_kwargs: dict[str, Any] = {}
-        if request.tools:
-            tool_kwargs["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
+        serialised_tools = self._serialize_tools(request.tools, request.provider, request.params)
+        if serialised_tools is not None:
+            tool_kwargs["tools"] = serialised_tools
         if request.tool_choice is not None:
             tool_kwargs["tool_choice"] = request.tool_choice
 
@@ -467,7 +557,8 @@ class LiteLLMTransport(BaseLLMProvider):
         openrouter_kwargs = self._openrouter_kwargs(request)
 
         raw = None
-        for attempt in range(settings.llm_retry_max_attempts):
+        max_attempts, backoff_base_s = _retry_settings(request)
+        for attempt in range(max_attempts):
             try:
                 raw = await litellm.acompletion(
                     model=model_str, messages=messages, drop_params=True,
@@ -477,9 +568,9 @@ class LiteLLMTransport(BaseLLMProvider):
                 break
             except Exception as error:
                 print(f"[litellm.chat] attempt={attempt} error_type={type(error).__name__} error={error}")
-                if not _should_retry(error) or attempt == settings.llm_retry_max_attempts - 1:
+                if not _should_retry(error) or attempt == max_attempts - 1:
                     raise _wrap_litellm_error(error) from error
-                await asyncio.sleep(_retry_delay(error, attempt))
+                await asyncio.sleep(_retry_delay(error, attempt, backoff_base_s))
 
         usage = self._extract_usage(raw)
         choices = self._map_choices(raw)
@@ -510,7 +601,7 @@ class LiteLLMTransport(BaseLLMProvider):
         self, request: NormalisedLLMRequest, key: TenantKeyPayload
     ) -> AsyncIterator[StreamEvent]:
         model_str = self._model_string(request.provider, request.model)
-        messages = self._serialize_messages(request.messages, request.provider)
+        messages = self._serialize_messages(request.messages, request.provider, request.params)
         credential_kwargs = self._credential_kwargs(key)
         param_kwargs = self._param_kwargs(request.params)
 
@@ -521,8 +612,9 @@ class LiteLLMTransport(BaseLLMProvider):
                 credential_kwargs["api_base"] = self._regions[0]
 
         tool_kwargs: dict[str, Any] = {}
-        if request.tools:
-            tool_kwargs["tools"] = [t.model_dump(exclude_none=True) for t in request.tools]
+        serialised_tools = self._serialize_tools(request.tools, request.provider, request.params)
+        if serialised_tools is not None:
+            tool_kwargs["tools"] = serialised_tools
         if request.tool_choice is not None:
             tool_kwargs["tool_choice"] = request.tool_choice
 
@@ -535,7 +627,8 @@ class LiteLLMTransport(BaseLLMProvider):
 
         # Retry connection setup before any tokens are sent to the caller.
         response_stream = None
-        for attempt in range(settings.llm_retry_max_attempts):
+        max_attempts, backoff_base_s = _retry_settings(request)
+        for attempt in range(max_attempts):
             try:
                 response_stream = await litellm.acompletion(
                     model=model_str,
@@ -551,7 +644,7 @@ class LiteLLMTransport(BaseLLMProvider):
                 )
                 break
             except Exception as error:
-                if not _should_retry(error) or attempt == settings.llm_retry_max_attempts - 1:
+                if not _should_retry(error) or attempt == max_attempts - 1:
                     upstream_error = _wrap_litellm_error(error)
                     yield StreamEvent(
                         type="error",
@@ -562,7 +655,7 @@ class LiteLLMTransport(BaseLLMProvider):
                         ),
                     )
                     return
-                await asyncio.sleep(_retry_delay(error, attempt))
+                await asyncio.sleep(_retry_delay(error, attempt, backoff_base_s))
 
         final_usage = UsageBlock()
         final_finish_reason = "stop"

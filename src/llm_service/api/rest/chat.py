@@ -7,6 +7,7 @@ from typing import Optional, Union
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.llm_service.api.deps import (
@@ -24,8 +25,8 @@ from src.llm_service.schemas.chat import (
 )
 from src.shared.config import settings
 from src.shared.db import get_db
-from src.shared.db.enums import BatchJobStatus
-from src.shared.db.models import BatchJob, Tenant
+from src.shared.db.enums import BatchJobStatus, Feature, LedgerStatus, Transport
+from src.shared.db.models import BatchJob, LedgerEntry, Tenant
 from src.shared.guardrails.base import GuardrailsChecker
 from src.shared.policy.checker import PolicyChecker, PolicyContext, PolicyExceededError
 from src.shared.queue.tasks import BATCH_ELIGIBLE_PROVIDERS
@@ -66,6 +67,73 @@ def _compute_cost(
     return cost
 
 
+async def _write_ledger_entry(
+    db: AsyncSession, *, request_id: str, tenant_id: str, provider: str, model: str,
+    feature: Feature, status: LedgerStatus, latency_ms: int,
+    usage: Optional["UsageBlock"] = None, cost: Optional[CostBlock] = None,
+    time_to_first_token_ms: Optional[int] = None, error_code: Optional[str] = None,
+    our_cache_hit: bool = False, guardrail_flags: Optional[dict] = None,
+    provider_reported_usage: Optional[dict] = None,
+) -> None:
+    """Write one audit row to ledger_entries.
+
+    Non-fatal by design (see docs/architecture.md pipeline step 9): the response has
+    already been produced, so a ledger write failure must never turn it into a 500.
+
+    request_id is client-supplied (X-Request-Id) and only unique per genuine retry of
+    the same call — by the time we get here, this request's own provider call (if any)
+    has already happened and was already billed. A request_id collision from an
+    unrelated call (client bug, or a reused header) must not silently drop this row,
+    so on a unique-constraint violation we retry once with a disambiguated id rather
+    than treating it as an already-recorded duplicate.
+    """
+    def _build_entry(entry_request_id: str) -> LedgerEntry:
+        return LedgerEntry(
+            request_id=entry_request_id,
+            tenant_id=tenant_id,
+            provider=provider,
+            model=model,
+            transport=Transport.LITELLM,
+            feature=feature,
+            tokens_in=usage.input_tokens if usage else 0,
+            tokens_out=usage.output_tokens if usage else 0,
+            input_tokens_cache_write=usage.input_tokens_cache_write if usage else None,
+            input_tokens_cache_read=usage.input_tokens_cache_read if usage else None,
+            upstream_prompt_cache_hit=((usage.input_tokens_cache_read or 0) > 0) if usage else None,
+            our_cost_usd=cost.computed_usd if cost else 0.0,
+            pricing_version=cost.pricing_version if cost else 0,
+            provider_reported_usage=provider_reported_usage,
+            provider_reported_cost_usd=cost.provider_reported_usd if cost else None,
+            latency_ms=latency_ms,
+            time_to_first_token_ms=time_to_first_token_ms,
+            status=status,
+            error_code=error_code,
+            our_cache_hit=our_cache_hit,
+            batched=False,
+            guardrail_flags=guardrail_flags,
+        )
+
+    db.add(_build_entry(request_id))
+    try:
+        await db.commit()
+        return
+    except IntegrityError as exc:
+        await db.rollback()
+        print(f"[ledger] request_id={request_id} collided with an existing row, retrying with a disambiguated id: {exc!r}")
+    except Exception as exc:
+        print(f"[ledger] write failed for request_id={request_id}: {exc!r}")
+        await db.rollback()
+        return
+
+    disambiguated_id = f"{request_id}:dup:{uuid.uuid4().hex[:8]}"
+    db.add(_build_entry(disambiguated_id))
+    try:
+        await db.commit()
+    except Exception as exc:
+        print(f"[ledger] retry write failed for request_id={disambiguated_id}: {exc!r}")
+        await db.rollback()
+
+
 @router.post("/chat", response_model=ChatResponse, responses={202: {"model": BatchAcceptedResponse}})
 async def chat(
     body: ChatRequest, request: Request, tenant: Tenant = Depends(get_tenant),
@@ -78,9 +146,9 @@ async def chat(
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
     print(f"[chat] request: {body.model_dump_json(indent=2)}")
-    normalised = normalise(body)
+    normalised = await normalise(body, db, tenant.id)
     try:
-        tenant_key = await secret_backend.get_key(tenant.id, body.provider)
+        tenant_key = await secret_backend.get_key(tenant.id, normalised.provider)
     except MissingTenantKeyError:
         raise HTTPException(status_code=422, detail="missing_tenant_key")
     try:
@@ -101,6 +169,15 @@ async def chat(
     cache_key = make_cache_key(tenant.id, normalised)
     cached = await cache.get(cache_key)
     if cached:
+        await _write_ledger_entry(
+            db, request_id=request_id, tenant_id=tenant.id,
+            provider=normalised.provider, model=normalised.model,
+            feature=Feature.CHAT, status=LedgerStatus.SUCCESS,
+            latency_ms=int((time.monotonic() - start) * 1000),
+            usage=cached.usage, cost=cached.cost.model_copy(update={"computed_usd": 0.0}),
+            our_cache_hit=True,
+            provider_reported_usage=(cached.provider_raw or {}).get("usage") or cached.usage.model_dump(),
+        )
         return cached.model_copy(update={"cache": CacheBlock(our_cache_hit=True)})
 
     if body.metadata and body.metadata.get("batch") is True:
@@ -128,6 +205,13 @@ async def chat(
     try:
         response = await transport.chat(normalised, tenant_key)
     except UpstreamTransportError as upstream_error:
+        await _write_ledger_entry(
+            db, request_id=request_id, tenant_id=tenant.id,
+            provider=normalised.provider, model=normalised.model,
+            feature=Feature.CHAT, status=LedgerStatus.ERROR,
+            latency_ms=int((time.monotonic() - start) * 1000),
+            error_code=upstream_error.code,
+        )
         extra_headers = {"Retry-After": upstream_error.retry_after} if upstream_error.retry_after else None
         raise HTTPException(
             status_code=upstream_error.http_status, detail=upstream_error.code,
@@ -148,7 +232,14 @@ async def chat(
         normalised.provider, normalised.model, response.usage,
         provider_reported_usd=response.cost.provider_reported_usd,
     )
-    # TODO: Step 10 — ledger write
+    await _write_ledger_entry(
+        db, request_id=request_id, tenant_id=tenant.id,
+        provider=normalised.provider, model=normalised.model,
+        feature=Feature.CHAT, status=LedgerStatus.SUCCESS,
+        latency_ms=elapsed_ms, usage=response.usage, cost=response.cost,
+        guardrail_flags=response.guardrails.model_dump() if response.guardrails else None,
+        provider_reported_usage=(response.provider_raw or {}).get("usage") or response.usage.model_dump(),
+    )
     await cache.set(cache_key, response, ttl_seconds=settings.cache_ttl_seconds)
     print(f"[chat] response: {response.model_dump_json(indent=2)}")
     return response
@@ -161,12 +252,13 @@ async def chat_stream(
     policy_checker: PolicyChecker = Depends(get_policy_checker),
     guardrails: GuardrailsChecker = Depends(get_guardrails),
     cache: CacheBackend = Depends(get_cache),
+    db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
-    normalised = normalise(body)
+    normalised = await normalise(body, db, tenant.id)
     try:
-        tenant_key = await secret_backend.get_key(tenant.id, body.provider)
+        tenant_key = await secret_backend.get_key(tenant.id, normalised.provider)
     except MissingTenantKeyError:
         raise HTTPException(status_code=422, detail="missing_tenant_key")
     try:
@@ -186,6 +278,15 @@ async def chat_stream(
     cache_key = make_cache_key(tenant.id, normalised)
     cached = await cache.get(cache_key)
     if cached:
+        await _write_ledger_entry(
+            db, request_id=request_id, tenant_id=tenant.id,
+            provider=normalised.provider, model=normalised.model,
+            feature=Feature.STREAM, status=LedgerStatus.SUCCESS,
+            latency_ms=int((time.monotonic() - start) * 1000),
+            usage=cached.usage, cost=cached.cost.model_copy(update={"computed_usd": 0.0}),
+            our_cache_hit=True,
+            provider_reported_usage=(cached.provider_raw or {}).get("usage") or cached.usage.model_dump(),
+        )
         finish = FinishData(
             id=request_id,
             finish_reason=cached.choices[0].finish_reason,
@@ -252,6 +353,13 @@ async def chat_stream(
                 upstream_cache_hit = (final_usage.input_tokens_cache_read or 0) > 0
             elif event.type == "error":
                 error_data: ErrorData = event.data
+                await _write_ledger_entry(
+                    db, request_id=request_id, tenant_id=tenant.id,
+                    provider=normalised.provider, model=normalised.model,
+                    feature=Feature.STREAM, status=LedgerStatus.ERROR,
+                    latency_ms=int((time.monotonic() - start) * 1000),
+                    error_code=error_data.code,
+                )
                 yield f"event: error\ndata: {error_data.model_dump_json()}\n\n"
                 return
 
@@ -312,7 +420,15 @@ async def chat_stream(
             policy=PolicyBlock(),
         )
         await cache.set(cache_key, cached_response, ttl_seconds=settings.cache_ttl_seconds)
-        # TODO: Step 10 — ledger write
+        await _write_ledger_entry(
+            db, request_id=request_id, tenant_id=tenant.id,
+            provider=normalised.provider, model=normalised.model,
+            feature=Feature.STREAM, status=LedgerStatus.SUCCESS,
+            latency_ms=elapsed_ms, time_to_first_token_ms=first_token_ms,
+            usage=final_usage, cost=computed_cost,
+            guardrail_flags=finish.guardrails.model_dump() if finish.guardrails else None,
+            provider_reported_usage=final_usage.model_dump(),
+        )
 
     return StreamingResponse(
         event_generator(),

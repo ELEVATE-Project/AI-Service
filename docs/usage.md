@@ -40,10 +40,12 @@ Returns the full response in one go.
     "seed": null,
     "connect_timeout": null,
     "read_timeout": null,
-    "web_search_options": null
+    "web_search_options": null,
+    "cache_options": null,
+    "retry": null
   },
-  "cache_policy": "auto",
-  "metadata": {}
+  "metadata": {},
+  "use_defaults": false
 }
 ```
 
@@ -51,15 +53,15 @@ Returns the full response in one go.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `provider` | `string` | Yes | `anthropic`, `openai`, `bedrock`, `groq`, `openrouter`, `custom_endpoint` |
-| `model` | `string` | Yes | Model ID as the provider uses it, e.g. `claude-sonnet-4-5`. For `openrouter`, use the OpenRouter slug, e.g. `openai/gpt-4o` or `anthropic/claude-3.5-sonnet`. |
+| `provider` | `string` | Conditionally | `anthropic`, `openai`, `bedrock`, `groq`, `openrouter`, `custom_endpoint`. Omit only when `use_defaults: true` and the tenant has a `default_provider` configured — otherwise required. |
+| `model` | `string` | Conditionally | Model ID as the provider uses it, e.g. `claude-sonnet-4-5`. For `openrouter`, use the OpenRouter slug, e.g. `openai/gpt-4o` or `anthropic/claude-3.5-sonnet`. Omit only when `use_defaults: true` and the tenant has a `default_model` configured — otherwise required. |
 | `messages` | `Message[]` | Yes | Conversation history. See message fields below. |
 | `tools` | `Tool[]` | No | Function definitions the model can call |
 | `tool_choice` | `string \| object` | No | `"auto"`, `"none"`, `"required"`, or `{"type":"function","function":{"name":"..."}}` |
 | `params` | `ChatParams` | No | Inference parameters. All fields optional. |
-| `cache_policy` | `string` | No | `"auto"` (default), `"explicit"`, or `"off"` — controls prompt cache hint injection |
 | `metadata` | `object` | No | Free-form. Pass `{"batch": true}` to submit asynchronously. Not sent upstream. |
-| `provider_options` | `object` | No | Provider-specific passthrough. Consumed only for `provider: "openrouter"` — keys: `provider` (routing prefs), `models` (fallback list), `referer` / `title` (app attribution). See [Provider Layer → OpenRouter](providers.md#openrouter). |
+| `provider_options` | `object` | No | Provider-specific passthrough. Consumed only for `provider: "openrouter"` — keys: `provider` (routing prefs), `models` (fallback list), `plugins` (e.g. web search), `referer` / `title` (app attribution). See [Provider Layer → OpenRouter](providers.md#openrouter). |
+| `use_defaults` | `bool` | No | `false`/omitted (default): `provider`/`model` are required as usual — today's behavior, unchanged. `true`: opts into filling, field-by-field, any of `provider`, `model`, or individual `params` fields the request left unset from the tenant's `tenant_defaults` row, if one exists. Defaults only fill gaps — any field the request *does* set (including a single `params` field like `max_tokens` while leaving `temperature` unset) is never overridden. See [Tenants → Tenant Defaults](auth-and-tenants.md) for the merge rule and a worked example. |
 
 **Message fields**
 
@@ -67,7 +69,7 @@ Returns the full response in one go.
 |-------|------|-------------|
 | `role` | `string` | `"system"`, `"user"`, `"assistant"`, or `"tool"` |
 | `content` | `string?` | Message text. Null for assistant messages that contain only `tool_calls`. |
-| `cache` | `string?` | `"ephemeral"` — requests provider-side prompt caching for this message. Works with Anthropic and Bedrock. |
+| `cache` | `string?` | `"ephemeral"` — requests provider-side prompt caching for this message. Works with Anthropic, Bedrock, and OpenRouter (Claude/Gemini/etc. models). Always takes precedence over `params.cache_options.enabled` for this message. See [Provider Layer → Prompt caching](providers.md#prompt-caching). |
 | `tool_calls` | `object[]?` | Tool calls the assistant issued. Present on `role: "assistant"` turns that invoked a tool. |
 | `tool_call_id` | `string?` | ID of the tool call this message is responding to. Present on `role: "tool"` turns. |
 
@@ -83,6 +85,8 @@ Returns the full response in one go.
 | `connect_timeout` | `float` | Seconds to wait for the upstream connection to establish. |
 | `read_timeout` | `float` | Seconds to wait for the upstream to return data after connecting. |
 | `web_search_options` | `object` | Enable web search. Fields: `search_context_size` (`string`), `user_location` (`object`). Provider-specific. |
+| `cache_options` | `object` | Opt-in automatic provider-side prompt caching. Fields: `enabled` (`bool`), `ttl` (`string`, `"5m"` or `"1h"`), `targets` (`string[]`, `"prompt"` and/or `"tools"`). See [Provider Layer → Prompt caching](providers.md#prompt-caching); current supported values are also served live at `GET /v1/cache/options`. |
+| `retry` | `object` | Per-request override of the service-wide retry defaults. Fields: `enabled` (`bool` — `false` forces a single attempt, no retry), `max_attempts` (`int`, `1`–`10`), `backoff_base_s` (`float`, seconds, `0`–`60`) — out-of-range values are rejected with `422`, not clamped. Only applies to the fixed set of retryable upstream error types (timeouts, rate limits, 5xx) — a non-retryable error (e.g. an invalid model ID) still fails on the first attempt regardless of these values. See [Provider Layer → LiteLLMTransport](providers.md#litellmtransport). |
 
 **Tool definition fields**
 
@@ -365,6 +369,32 @@ curl http://localhost:8000/v1/chat/batch/<job_id> \
 | `error_code` | Reason for failure when `status == "failed"`. `null` otherwise. |
 
 Keep polling until `status` is `"complete"` or `"failed"`. There is no webhook — the caller polls.
+
+---
+
+## GET /v1/cache/options
+
+Supported values for `params.cache_options` — poll this instead of hardcoding `ttl`/`targets` values, so a calling service always gets the current supported set.
+
+```bash
+curl http://localhost:8000/v1/cache/options \
+  -H "Authorization: Bearer <bearer-token>" \
+  -H "X-Tenant-Id: saathi"
+```
+
+```json
+{
+  "data": {
+    "providers": ["anthropic", "bedrock", "openrouter"],
+    "ttl_values": ["5m", "1h"],
+    "ttl_default": null,
+    "target_values": ["prompt", "tools"],
+    "target_default": ["prompt", "tools"]
+  }
+}
+```
+
+See [Provider Layer → Prompt caching](providers.md#prompt-caching) for the full behavior.
 
 ---
 

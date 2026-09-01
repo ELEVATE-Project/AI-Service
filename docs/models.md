@@ -1,6 +1,6 @@
 # Database Models
 
-The gateway uses PostgreSQL with seven SQLAlchemy models. This page documents each table — what it stores, why each column exists, and how the tables relate.
+The gateway uses PostgreSQL with eight SQLAlchemy models. This page documents each table — what it stores, why each column exists, and how the tables relate.
 
 ---
 
@@ -81,7 +81,7 @@ One row per upstream LLM call. The audit log for every request — tokens, cost,
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | `uuid` (PK) | UUID primary key. |
-| `request_id` | `string` (unique) | Client-supplied or gateway-generated idempotency key. Idempotent inserts use `ON CONFLICT DO NOTHING`. |
+| `request_id` | `string` (unique) | Client-supplied (`X-Request-Id`) or gateway-generated correlation id. The unique constraint is not a strict idempotency guarantee — a collision from an unrelated call (the underlying provider call, if any, has already happened by the time a collision is detected) is retried once under a disambiguated `<request_id>:dup:<suffix>` id rather than dropped, so a real request never loses its audit row. |
 | `tenant_id` | `string` (FK) | Owning tenant. |
 | `created_at` | `timestamptz` | Row creation timestamp (UTC). |
 | `provider` | `string` | e.g. `anthropic`, `openai`, `bedrock`. |
@@ -149,6 +149,24 @@ Per-tenant usage controls. One row per tenant. All limits are optional (`null` =
 | `denied_models` | `string[]?` | Blacklist of model IDs. `null` = none denied. |
 | `created_at` | `timestamptz` | Row creation timestamp (UTC). |
 | `updated_at` | `timestamptz?` | Last modification timestamp. `null` until first update. |
+
+---
+
+## `tenant_defaults`
+
+Per-tenant defaults for `provider`/`model`/params, one row per tenant. Applied by the normaliser only when a request explicitly opts in with `use_defaults: true` — a request that omits `use_defaults` (or sets it `false`) still requires `provider`/`model` itself, unchanged from before this table existed.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | `uuid` (PK) | UUID primary key. |
+| `tenant_id` | `string` (FK, unique) | One defaults row per tenant. |
+| `default_provider` | `string?` | Used when the request omits `provider`. |
+| `default_model` | `string?` | Used when the request omits `model`. |
+| `default_params` | `jsonb?` | A `ChatParams`-shaped object. Each field is merged in only where the request left that field unset — request values always win. |
+| `created_at` | `timestamptz` | Row creation timestamp (UTC). |
+| `updated_at` | `timestamptz?` | Last modification timestamp. `null` until first update. |
+
+Provider and model defaults are independent — a tenant can set just one, both, or neither. Set up via `scripts/add_tenant_key.py`, which prompts for defaults right after tenant creation. See [Auth & Tenants → Tenant defaults](auth-and-tenants.md#tenant-defaults) for the field-by-field merge rule and a worked override example.
 
 ---
 

@@ -88,7 +88,25 @@ raw = await litellm.acompletion(
 )
 ```
 
-**Retry logic:** retries on `Timeout`, `ServiceUnavailableError`, `APIConnectionError`, `InternalServerError`, and `RateLimitError`. Configurable via `LLM_RETRY_MAX_ATTEMPTS` and `LLM_RETRY_BACKOFF_BASE_S`. For rate limits, respects the upstream `Retry-After` header if present.
+**Retry logic:** retries on `Timeout`, `ServiceUnavailableError`, `APIConnectionError`, `InternalServerError`, and `RateLimitError` — this error-type allowlist is fixed, not configurable. Any other exception (e.g. `BadRequestError` from an invalid model ID) fails on the first attempt regardless of attempt count, since retrying wouldn't change the outcome. For rate limits, respects the upstream `Retry-After` header if present.
+
+Attempt count and backoff default to `LLM_RETRY_MAX_ATTEMPTS` / `LLM_RETRY_BACKOFF_BASE_S`, but a request can override either per call via `params.retry` (see [Usage Guide → params fields](usage.md#post-v1chat)):
+
+```json
+"params": {
+  "retry": { "enabled": true, "max_attempts": 3, "backoff_base_s": 2.0 }
+}
+```
+
+| Field | Type | Bounds | Default when omitted |
+|-------|------|--------|-----------------------|
+| `enabled` | `bool` | — | service default (retries on) — set `false` to force a single attempt, no retry |
+| `max_attempts` | `int` | `1`–`10` | `LLM_RETRY_MAX_ATTEMPTS` |
+| `backoff_base_s` | `float` | `0`–`60` | `LLM_RETRY_BACKOFF_BASE_S` |
+
+`enabled: false` always wins over `max_attempts`. Omitting `enabled` (or passing `true`) does not itself force retries where the error type isn't retryable — it only supplies attempt count/backoff to be used *if* the error is one of the types above.
+
+`max_attempts` and `backoff_base_s` are validated at the schema boundary (`422` if out of range) rather than merely clamped — `max_attempts: 0` would leave the retry loop's upstream response as `None` and crash further down rather than making a clean call, and an unbounded `max_attempts` would let a single request hold a worker retrying indefinitely and hammer the upstream provider.
 
 **Error wrapping:** LiteLLM exceptions are caught and converted to `UpstreamTransportError` with a structured `code`:
 
@@ -103,7 +121,53 @@ raw = await litellm.acompletion(
 
 **Multi-region failover:** if the registry entry has multiple regions, LiteLLM's `fallbacks=[...]` mechanism is used. The primary region is tried first; on failure, subsequent regions are tried automatically by the SDK.
 
-**Prompt caching:** for Anthropic and Bedrock, messages marked with `cache: "ephemeral"` get `cache_control` blocks injected before sending. OpenAI prompt caching is automatic (no explicit markers needed).
+**Prompt caching:** see [Prompt caching](#prompt-caching) below.
+
+---
+
+## Prompt caching
+
+Provider-side prompt caching (Anthropic's `cache_control`) lets a repeated static prefix — a long system prompt, a tool schema — be reused server-side across separate requests instead of reprocessed every time. Supported for `anthropic`, `bedrock`, and `openrouter` (for Claude/Gemini/MiniMax/GLM/z-ai models — LiteLLM silently drops the marker for unsupported OpenRouter models rather than erroring). It's a no-op for `openai`, whose caching is automatic and needs no marker at all.
+
+There are two ways to opt in, and they compose — `_serialize_messages`/`_serialize_tools` in `providers/litellm.py` implement both:
+
+**1. Explicit, per-message** — the calling service marks exactly what it wants cached:
+
+```json
+{"role": "system", "content": "...", "cache": "ephemeral"}
+```
+
+**2. Automatic, via `params.cache_options`** — the calling service just flips a switch and the gateway picks sensible cache points, so it doesn't have to reason about which messages to mark:
+
+```json
+"params": {
+  "cache_options": {"enabled": true, "ttl": "1h", "targets": ["prompt", "tools"]}
+}
+```
+
+| `cache_options` field | Type | Meaning |
+|---|---|---|
+| `enabled` | `bool` | Opt-in. When true, the gateway caches the *last* `role: "system"` message (if `"prompt"` is a target) and the *last* tool definition (if `"tools"` is a target and `tools` is present) — the two places static, reused content usually lives. Never touches user/assistant turns. |
+| `ttl` | `string?` | `"5m"` (Anthropic default) or `"1h"` (2× write cost, useful for prefixes reused less often than every 5 minutes). Omit to use the provider's own default. Applies to every `cache_control` block this request builds, whether from `enabled` or an explicit per-message marker. |
+| `targets` | `string[]?` | Which of `"prompt"` / `"tools"` to auto-cache. Omitted + `enabled: true` → both. |
+
+An explicit `"cache": "ephemeral"` on a message always overrides `enabled` for that specific message — auto-caching only fills in what wasn't already marked. Supported `ttl`/`targets` values are enforced by the request schema (a bad value is a `422`, not a silent no-op) and are also served live at `GET /v1/cache/options`, so calling services can read current supported values instead of hardcoding them:
+
+```json
+{
+  "data": {
+    "providers": ["anthropic", "bedrock", "openrouter"],
+    "ttl_values": ["5m", "1h"],
+    "ttl_default": null,
+    "target_values": ["prompt", "tools"],
+    "target_default": ["prompt", "tools"]
+  }
+}
+```
+
+**Wire format:** Anthropic (direct/Bedrock) needs `cache_control` nested inside a content block (`{"type": "text", "text": "...", "cache_control": {"type": "ephemeral"}}`); OpenRouter takes it as a top-level key on the message/tool dict and LiteLLM's own OpenRouter adapter relocates or strips it depending on model support (`llms/openrouter/chat/transformation.py:_move_cache_control_to_content`).
+
+Note this is unrelated to the gateway's own Redis response cache (`cache.our_cache_hit` — see [Response Cache](cache.md)), which is a separate, fully automatic exact-request-match cache.
 
 ---
 
@@ -125,6 +189,7 @@ OpenRouter gives a tenant access to OpenRouter's full model catalog through a si
 |---|---|---|
 | `provider` | `extra_body.provider` | OpenRouter routing prefs (`order`, `allow_fallbacks`, `data_collection`, `require_parameters`) |
 | `models` | `extra_body.models` | Model fallback list |
+| `plugins` | `extra_body.plugins` | OpenRouter plugins, e.g. `[{"id": "web"}]` for web search |
 | `referer` / `title` | `HTTP-Referer` / `X-Title` headers | App attribution (defaults from `OPENROUTER_APP_URL` / `OPENROUTER_APP_TITLE`) |
 
 ```json
@@ -139,6 +204,8 @@ OpenRouter gives a tenant access to OpenRouter's full model catalog through a si
   }
 }
 ```
+
+**Web search:** the provider-agnostic `params.web_search_options` (see [`docs/usage.md`](usage.md)) is enough to enable web search — no need to know OpenRouter's plugin format. If set and `provider_options.plugins` isn't already given explicitly, the gateway synthesises `extra_body.plugins = [{"id": "web", "max_results": <n>}]` automatically, mapping `search_context_size` to `max_results` (`low`→3, `medium`→5, `high`→8; omitted if `search_context_size` isn't set). Pass `provider_options.plugins` directly for full manual control (e.g. a custom `search_prompt`), which always takes precedence.
 
 **Batch:** OpenRouter has no batch API. It is not in `BATCH_ELIGIBLE_PROVIDERS`, so a `metadata.batch = true` request for `openrouter` returns `422 provider_not_batch_eligible`.
 

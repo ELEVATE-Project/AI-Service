@@ -1,7 +1,16 @@
 from __future__ import annotations
 from typing import Any, Literal, Optional
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from src.shared.schemas.envelope import CostBlock, GuardrailsBlock, LatencyBlock, PolicyBlock
+
+# Single source of truth for provider-side prompt-cache capability, consumed by
+# the serialization logic (providers/litellm.py), schema validation below, and
+# the GET /v1/cache/options endpoint — so calling services always read the
+# current supported values instead of hardcoding them.
+CACHE_CAPABLE_PROVIDERS: tuple[str, ...] = ("anthropic", "bedrock", "openrouter")
+CACHE_TTL_VALUES: tuple[str, ...] = ("5m", "1h")
+CACHE_TARGET_VALUES: tuple[str, ...] = ("prompt", "tools")
+CACHE_TARGET_DEFAULT: tuple[str, ...] = ("prompt", "tools")
 
 
 class UsageBlock(BaseModel):
@@ -44,6 +53,53 @@ class WebSearchOptions(BaseModel):
     user_location: Optional[dict[str, Any]] = None
 
 
+class CacheOptions(BaseModel):
+    """Opt-in provider-side prompt caching, applied automatically so calling
+    services don't have to mark individual messages/tools themselves.
+
+    An explicit ``"cache": "ephemeral"`` on a message always overrides
+    ``enabled`` for that message. Supported values come from
+    ``CACHE_TTL_VALUES`` / ``CACHE_TARGET_VALUES`` above — also served live
+    via GET /v1/cache/options.
+    """
+    enabled: Optional[bool] = None
+    ttl: Optional[str] = None
+    targets: Optional[list[str]] = None
+
+    @field_validator("ttl")
+    @classmethod
+    def _validate_ttl(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and value not in CACHE_TTL_VALUES:
+            raise ValueError(f"ttl must be one of {CACHE_TTL_VALUES}")
+        return value
+
+    @field_validator("targets")
+    @classmethod
+    def _validate_targets(cls, value: Optional[list[str]]) -> Optional[list[str]]:
+        if value is not None:
+            invalid = set(value) - set(CACHE_TARGET_VALUES)
+            if invalid:
+                raise ValueError(f"targets contains unsupported values {sorted(invalid)}; must be one of {CACHE_TARGET_VALUES}")
+        return value
+
+
+RETRY_MAX_ATTEMPTS_CEILING = 10
+RETRY_BACKOFF_BASE_S_CEILING = 60.0
+
+
+class RetryOptions(BaseModel):
+    """Per-request override of the service-wide retry defaults (Settings.llm_retry_*).
+
+    max_attempts=0 (or negative) would skip the upstream call in LiteLLMTransport's
+    retry loop entirely, crashing further down instead of erroring cleanly — 1 is
+    the floor. Ceilings cap how long a request can hold a worker retrying.
+    """
+
+    enabled: Optional[bool] = None
+    max_attempts: Optional[int] = Field(default=None, ge=1, le=RETRY_MAX_ATTEMPTS_CEILING)
+    backoff_base_s: Optional[float] = Field(default=None, ge=0.0, le=RETRY_BACKOFF_BASE_S_CEILING)
+
+
 class ChatParams(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
@@ -53,22 +109,27 @@ class ChatParams(BaseModel):
     connect_timeout: Optional[float] = None
     read_timeout: Optional[float] = None
     web_search_options: Optional[WebSearchOptions] = None
+    cache_options: Optional[CacheOptions] = None
+    retry: Optional[RetryOptions] = None
 
 
 class ChatRequest(BaseModel):
-    provider: str
-    model: str
+    provider: Optional[str] = None
+    model: Optional[str] = None
     messages: list[MessageParam]
     tools: Optional[list[Tool]] = None
     tool_choice: Optional[Any] = None
     params: Optional[ChatParams] = None
-    cache_policy: Literal["auto", "explicit", "off"] = "auto"
     metadata: Optional[dict[str, Any]] = None
     # Provider-specific passthrough. Currently consumed only for provider="openrouter":
     #   provider — OpenRouter routing prefs (order, allow_fallbacks, data_collection, ...)
     #   models   — OpenRouter model fallback list
+    #   plugins  — OpenRouter plugins (e.g. web search)
     #   referer / title — per-request app-attribution overrides
     provider_options: Optional[dict[str, Any]] = None
+    # Opt-in only: omitted/False leaves provider/model required as before. True makes the
+    # normaliser look up the tenant's TenantDefaults row and fill in whatever the request omitted.
+    use_defaults: Optional[bool] = None
 
 
 class NormalisedLLMRequest(BaseModel):

@@ -7,7 +7,7 @@ import pytest
 from src.llm_service.cache.keys import make_cache_key
 from src.llm_service.providers import litellm as litellm_transport
 from src.llm_service.providers.litellm import LiteLLMTransport, _extract_response_cost
-from src.llm_service.schemas.chat import MessageParam, NormalisedLLMRequest
+from src.llm_service.schemas.chat import ChatParams, MessageParam, NormalisedLLMRequest, WebSearchOptions
 from src.shared.db.enums import KeyFormat
 from src.shared.secrets.backend import TenantKeyPayload
 
@@ -49,12 +49,17 @@ class _FakeRaw:
         return {"ok": True}
 
 
-def _req(provider: str = "openrouter", provider_options: dict | None = None) -> NormalisedLLMRequest:
+def _req(
+    provider: str = "openrouter",
+    provider_options: dict | None = None,
+    params: ChatParams | None = None,
+) -> NormalisedLLMRequest:
     return NormalisedLLMRequest(
         provider=provider,
         model="openai/gpt-4o",
         messages=[MessageParam(role="user", content="hi")],
         provider_options=provider_options,
+        params=params,
     )
 
 
@@ -129,12 +134,14 @@ def test_openrouter_kwargs_maps_provider_options() -> None:
     opts = {
         "provider": {"order": ["Anthropic"], "allow_fallbacks": False},
         "models": ["anthropic/claude-3.5-sonnet"],
+        "plugins": [{"id": "web"}],
         "referer": "https://app.example.com",
         "title": "ai-service",
     }
     kwargs = LiteLLMTransport()._openrouter_kwargs(_req(provider_options=opts))
     assert kwargs["extra_body"]["provider"] == opts["provider"]
     assert kwargs["extra_body"]["models"] == opts["models"]
+    assert kwargs["extra_body"]["plugins"] == opts["plugins"]
     assert kwargs["extra_headers"] == {
         "HTTP-Referer": "https://app.example.com",
         "X-Title": "ai-service",
@@ -154,6 +161,35 @@ def test_openrouter_kwargs_uses_settings_defaults(monkeypatch) -> None:
         "HTTP-Referer": "https://default.example",
         "X-Title": "default-title",
     }
+
+
+# ── web_search_options → auto-synthesised web plugin ────────────────────────
+
+@pytest.mark.parametrize(
+    "context_size,expected_max_results",
+    [("low", 3), ("medium", 5), ("high", 8), (None, None)],
+)
+def test_openrouter_kwargs_synthesises_web_plugin_from_web_search_options(
+    context_size, expected_max_results,
+) -> None:
+    params = ChatParams(web_search_options=WebSearchOptions(search_context_size=context_size))
+    kwargs = LiteLLMTransport()._openrouter_kwargs(_req(params=params))
+    expected_plugin: dict = {"id": "web"}
+    if expected_max_results is not None:
+        expected_plugin["max_results"] = expected_max_results
+    assert kwargs["extra_body"]["plugins"] == [expected_plugin]
+
+
+def test_openrouter_kwargs_explicit_plugins_override_web_search_options() -> None:
+    params = ChatParams(web_search_options=WebSearchOptions(search_context_size="high"))
+    opts = {"plugins": [{"id": "web", "max_results": 1, "search_prompt": "custom"}]}
+    kwargs = LiteLLMTransport()._openrouter_kwargs(_req(provider_options=opts, params=params))
+    assert kwargs["extra_body"]["plugins"] == opts["plugins"]
+
+
+def test_openrouter_kwargs_no_plugin_without_web_search_options() -> None:
+    kwargs = LiteLLMTransport()._openrouter_kwargs(_req())
+    assert "plugins" not in kwargs.get("extra_body", {})
     assert "extra_body" not in kwargs
 
 

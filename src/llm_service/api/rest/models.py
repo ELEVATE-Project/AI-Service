@@ -10,9 +10,12 @@ from src.llm_service.providers.catalog import (
     get_openrouter_model_endpoints, known_litellm_providers, known_modes,
     list_litellm_models, list_openrouter_models,
 )
+from src.llm_service.schemas.chat import (
+    CACHE_CAPABLE_PROVIDERS, CACHE_TARGET_DEFAULT, CACHE_TARGET_VALUES, CACHE_TTL_VALUES,
+)
 from src.llm_service.schemas.models import (
-    ModelEndpointsResponse, ModelInfo, ModelsListResponse, ModesListResponse,
-    ProviderInfo, ProvidersListResponse,
+    CacheOptionsInfo, CacheOptionsResponse, ModelEndpointsResponse, ModelInfo,
+    ModelsListResponse, ModesListResponse, ProviderInfo, ProvidersListResponse,
 )
 from src.shared.db.models import Tenant
 from src.shared.secrets.backend import MissingTenantKeyError, SecretBackend
@@ -73,6 +76,21 @@ async def list_models(
         models = [m for m in models if needle in m.id.lower() or needle in m.name.lower()]
 
     return ModelsListResponse(data=models)
+
+
+@router.get("/cache/options", response_model=CacheOptionsResponse)
+async def get_cache_options(tenant: Tenant = Depends(get_tenant)) -> CacheOptionsResponse:
+    """Supported values for `params.cache_options` — poll this instead of hardcoding
+    ttl/target values on the calling-service side."""
+    return CacheOptionsResponse(
+        data=CacheOptionsInfo(
+            providers=list(CACHE_CAPABLE_PROVIDERS),
+            ttl_values=list(CACHE_TTL_VALUES),
+            ttl_default=None,
+            target_values=list(CACHE_TARGET_VALUES),
+            target_default=list(CACHE_TARGET_DEFAULT),
+        )
+    )
 
 
 @router.get("/models/endpoints", response_model=ModelEndpointsResponse)

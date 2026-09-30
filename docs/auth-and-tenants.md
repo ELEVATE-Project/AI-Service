@@ -30,6 +30,31 @@ Tenant IDs are slug-style strings like `saathi` or `my_project`. They appear as 
 
 ---
 
+## Tenant defaults
+
+A tenant can optionally configure a default `provider`, `model`, and/or set of `params` (temperature, max_tokens, top_p, ...), stored in the `tenant_defaults` table — see [Database Models → tenant_defaults](models.md#tenant_defaults) for the column-level schema.
+
+These defaults are **opt-in per request**, not automatic: a calling service must set `"use_defaults": true` on the `/v1/chat` or `/v1/chat/stream` body for the normaliser to look them up. A request that omits `use_defaults` (or sets it `false`) still requires `provider`/`model` explicitly, exactly as before this feature existed — so existing calling services are unaffected unless they opt in. See [Usage Guide → params fields](usage.md#post-v1chat) for the request-side field.
+
+**Defaults fill gaps, they never override.** Resolution happens field-by-field in `normalise()`: for `provider`, `model`, and each individual field inside `params`, the tenant default is only applied when the request left that exact field unset. Anything the request does set — even with `use_defaults: true` — is left untouched. A request can rely on the tenant default for `provider` while still overriding `model` and one `params` field, all in the same call.
+
+Example — tenant `saathi` has `default_provider: "anthropic"`, `default_model: "claude-sonnet-4-5"`, `default_params: {"temperature": 0.7, "max_tokens": 1024}`:
+
+```json
+{
+  "model": "claude-haiku-4-5",
+  "messages": [{"role": "user", "content": "hi"}],
+  "params": {"max_tokens": 256},
+  "use_defaults": true
+}
+```
+
+resolves to `provider: "anthropic"` (filled from the default — request omitted it), `model: "claude-haiku-4-5"` (request's own value, default ignored), `params.temperature: 0.7` (filled from the default), `params.max_tokens: 256` (request's own value, default ignored).
+
+Set defaults for a tenant with `scripts/add_tenant_key.py` — it prompts "Set defaults for this tenant?" right after tenant creation, then a free-flow `key=value` loop for `default_params`, validated against the same `ChatParams` schema the API enforces (an unknown key or invalid value is rejected in place and re-prompted, so a saved default can never be one the gateway would reject at request time). Only scalar fields are settable this way — `temperature`, `max_tokens`, `top_p`, `seed`, `connect_timeout`, `read_timeout`, `stop`.
+
+---
+
 ## What is a calling service?
 
 A calling service is a registered backend application that sends requests to the gateway — a chatbot, a document pipeline, an internal tool. Each has:

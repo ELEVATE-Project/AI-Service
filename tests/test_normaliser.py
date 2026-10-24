@@ -1,6 +1,8 @@
 """Unit tests for tenant-default resolution in normalise()."""
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import litellm  # noqa: F401 — importing this appends the repo root to sys.path, required for `from src...` below
 import pytest
 from fastapi import HTTPException
@@ -8,6 +10,7 @@ from fastapi import HTTPException
 from src.llm_service.normaliser import normalise
 from src.llm_service.schemas.chat import ChatParams, ChatRequest, MessageParam
 from src.shared.db.models import TenantDefaults
+from src.llm_service.providers.litellm import LiteLLMTransport
 
 
 class _FakeResult:
@@ -94,3 +97,41 @@ async def test_use_defaults_true_with_no_tenant_defaults_row_still_400s() -> Non
     with pytest.raises(HTTPException) as exc_info:
         await normalise(req, _FakeSession(None), "tenant_acme")
     assert exc_info.value.status_code == 400
+
+
+@pytest.mark.parametrize("shape", ["anthropic_dict", "anthropic_object", "litellm"])
+def test_extract_usage_adds_ttl_split_without_changing_existing_fields(shape) -> None:
+    split = {"ephemeral_5m_input_tokens": 12000, "ephemeral_1h_input_tokens": 20000}
+    raw_usage = SimpleNamespace(
+        prompt_tokens=35000, completion_tokens=10, total_tokens=35010,
+        cache_read_input_tokens=2000, cache_creation_input_tokens=32000,
+    )
+    if shape == "anthropic_dict":
+        raw_usage.cache_creation = split
+    elif shape == "anthropic_object":
+        raw_usage.cache_creation = SimpleNamespace(**split)
+    else:
+        from litellm.types.utils import CacheCreationTokenDetails, PromptTokensDetailsWrapper, Usage
+        raw_usage = Usage(
+            **vars(raw_usage),
+            prompt_tokens_details=PromptTokensDetailsWrapper(
+                cached_tokens=2000, cache_creation_tokens=32000,
+                cache_creation_token_details=CacheCreationTokenDetails(**split),
+            ),
+        )
+    usage = LiteLLMTransport()._extract_usage(SimpleNamespace(usage=raw_usage))
+    assert usage.input_tokens == 35000
+    assert usage.output_tokens == 10
+    assert usage.total_tokens == 35010
+    assert usage.input_tokens_cache_read == 2000
+    assert usage.input_tokens_cache_write == 32000
+    assert usage.input_tokens_cache_write_5m == 12000
+    assert usage.input_tokens_cache_write_1h == 20000
+
+
+def test_extract_usage_without_split_keeps_it_unknown() -> None:
+    usage = LiteLLMTransport()._extract_usage(SimpleNamespace(usage=SimpleNamespace(
+        prompt_tokens=33000, cache_creation_input_tokens=32000,
+    )))
+    assert usage.input_tokens_cache_write_5m is None
+    assert usage.input_tokens_cache_write_1h is None

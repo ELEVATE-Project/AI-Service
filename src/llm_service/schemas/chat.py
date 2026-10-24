@@ -19,6 +19,9 @@ class UsageBlock(BaseModel):
     input_tokens_cache_write: Optional[int] = None
     input_tokens_cache_read: Optional[int] = None
     total_tokens: int = 0
+    # Optional response TTL breakdown; aggregate fields retain their meaning.
+    input_tokens_cache_write_5m: Optional[int] = None
+    input_tokens_cache_write_1h: Optional[int] = None
 
 
 class CacheBlock(BaseModel):

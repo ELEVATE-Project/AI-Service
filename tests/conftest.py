@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import os
 
+# LiteLLM otherwise fetches its price map from GitHub during import.
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+
 _DEFAULTS = {
     "DB_URL": "postgresql+asyncpg://postgres:postgres@localhost:5432/llm_service",
     "REDIS_URL": "redis://localhost:6379",

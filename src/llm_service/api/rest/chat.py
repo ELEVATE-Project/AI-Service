@@ -44,6 +44,7 @@ def _new_request_id() -> str:
 def _compute_cost(
     provider: str, model: str, usage: "UsageBlock",
     provider_reported_usd: Optional[float] = None,
+    *, cache_ttl: Optional[str] = None,
 ) -> CostBlock:
     """Build the cost envelope: YAML-computed cost, falling back to provider-reported cost.
 
@@ -59,6 +60,9 @@ def _compute_cost(
             tokens_out=usage.output_tokens,
             cache_write_tokens=usage.input_tokens_cache_write or 0,
             cache_read_tokens=usage.input_tokens_cache_read or 0,
+            cache_write_5m_tokens=usage.input_tokens_cache_write_5m,
+            cache_write_1h_tokens=usage.input_tokens_cache_write_1h,
+            cache_ttl=cache_ttl,
         )
     except UnknownModelError:
         cost = CostBlock(computed_usd=provider_reported_usd or 0.0)
@@ -231,6 +235,8 @@ async def chat(
     response.cost = _compute_cost(
         normalised.provider, normalised.model, response.usage,
         provider_reported_usd=response.cost.provider_reported_usd,
+        cache_ttl=(normalised.params.cache_options.ttl
+                   if normalised.params and normalised.params.cache_options else None),
     )
     await _write_ledger_entry(
         db, request_id=request_id, tenant_id=tenant.id,
@@ -369,6 +375,8 @@ async def chat_stream(
         computed_cost = _compute_cost(
             normalised.provider, normalised.model, final_usage,
             provider_reported_usd=final_reported_cost,
+            cache_ttl=(normalised.params.cache_options.ttl
+                       if normalised.params and normalised.params.cache_options else None),
         )
         finish = FinishData(
             id=request_id,

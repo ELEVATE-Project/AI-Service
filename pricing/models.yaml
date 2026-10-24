@@ -1,4 +1,4 @@
-pricing_version: 1
+pricing_version: 2
 
 # Note: OpenRouter (provider="openrouter") models do not need entries here.
 # OpenRouter reports the real cost per call, which the gateway records into
@@ -26,8 +26,10 @@ models:
     input_rate_per_1k_tokens: 0.001
     output_rate_per_1k_tokens: 0.005
     cache_write_rate_per_1k_tokens: 0.00125
+    # Anthropic pricing page checked 2026-10-24: 1h writes cost $2/MTok.
+    cache_write_1h_rate_per_1k_tokens: 0.002
     cache_read_rate_per_1k_tokens: 0.0001
-    last_updated: "2026-05-27"
+    last_updated: "2026-10-24"
     source_url: "https://platform.claude.com/docs/en/about-claude/pricing"
 
   bedrock/us.meta.llama3-3-70b-instruct-v1:0:

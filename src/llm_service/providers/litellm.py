@@ -463,12 +463,24 @@ class LiteLLMTransport(BaseLLMProvider):
         cache_read = getattr(raw_usage, "cache_read_input_tokens", cache_read) or cache_read
         cache_write = getattr(raw_usage, "cache_creation_input_tokens", cache_write) or cache_write
 
+        # LiteLLM 1.83 maps Anthropic's cache_creation to this nested wrapper.
+        # Also accept the provider's original cache_creation dict/object shape.
+        details = getattr(raw_usage, "prompt_tokens_details", None)
+        split = getattr(details, "cache_creation_token_details", None)
+        if split is None:
+            split = getattr(raw_usage, "cache_creation", None)
+
+        def _split_count(name: str) -> Optional[int]:
+            return split.get(name) if isinstance(split, dict) else getattr(split, name, None)
+
         return UsageBlock(
             input_tokens=getattr(raw_usage, "prompt_tokens", 0) or 0,
             output_tokens=getattr(raw_usage, "completion_tokens", 0) or 0,
             input_tokens_cache_read=cache_read or None,
             input_tokens_cache_write=cache_write or None,
             total_tokens=getattr(raw_usage, "total_tokens", 0) or 0,
+            input_tokens_cache_write_5m=_split_count("ephemeral_5m_input_tokens"),
+            input_tokens_cache_write_1h=_split_count("ephemeral_1h_input_tokens"),
         )
 
     def _normalize_citations(self, raw_message: Any) -> Optional[list[Any]]:

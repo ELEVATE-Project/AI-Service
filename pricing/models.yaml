@@ -1,4 +1,4 @@
-pricing_version: 2
+pricing_version: 3
 
 # Note: OpenRouter (provider="openrouter") models do not need entries here.
 # OpenRouter reports the real cost per call, which the gateway records into
@@ -30,6 +30,24 @@ models:
     cache_write_1h_rate_per_1k_tokens: 0.002
     cache_read_rate_per_1k_tokens: 0.0001
     last_updated: "2026-10-24"
+    source_url: "https://platform.claude.com/docs/en/about-claude/pricing"
+
+  anthropic/claude-haiku-5-5:
+    input_rate_per_1k_tokens: 0.0001
+    output_rate_per_1k_tokens: 0.0005
+    cache_write_rate_per_1k_tokens: 0.000125
+    cache_write_1h_rate_per_1k_tokens: 0.0002
+    cache_read_rate_per_1k_tokens: 0.00001
+    # Strictly above 100k inclusive input tokens, all tokens use these rates.
+    # Input includes cache reads and writes, even when part of the prompt is a hit.
+    long_prompt_tier:
+      threshold_tokens: 100000
+      input_rate_per_1k_tokens: 0.0005
+      output_rate_per_1k_tokens: 0.0025
+      cache_write_rate_per_1k_tokens: 0.000625
+      cache_write_1h_rate_per_1k_tokens: 0.001
+      cache_read_rate_per_1k_tokens: 0.00005
+    last_updated: "2026-10-25"
     source_url: "https://platform.claude.com/docs/en/about-claude/pricing"
 
   bedrock/us.meta.llama3-3-70b-instruct-v1:0:

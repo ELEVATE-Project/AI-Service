@@ -25,16 +25,18 @@ class PricingTable:
     def version(self) -> int:
         return self._version
 
-    def _rates_for_prompt(self, provider: str, model: str, *, prompt_tokens: int) -> dict[str, Any]:
-        """Select rates using the full prompt size, including cache tokens.
+    def has_model(self, provider: str, model: str) -> bool:
+        return f"{provider}/{model}" in self._models
 
-        T33 can add prompt-size tiers here without changing cost arithmetic.
-        All current entries have a single set of rates.
-        """
+    def _rates_for_prompt(self, provider: str, model: str, *, prompt_tokens: int) -> dict[str, Any]:
+        """Select rates using the full prompt size, including cache tokens."""
         key = f"{provider}/{model}"
         rates = self._models.get(key)
         if rates is None:
             raise UnknownModelError(f"no pricing for {key}")
+        tier = rates.get("long_prompt_tier")
+        if tier is not None and prompt_tokens > tier["threshold_tokens"]:
+            return tier
         return rates
 
     def compute_cost(

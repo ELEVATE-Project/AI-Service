@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -35,10 +36,20 @@ from src.shared.schemas.envelope import CostBlock, GuardrailsBlock, LatencyBlock
 from src.shared.secrets.backend import MissingTenantKeyError, SecretBackend
 
 router = APIRouter(prefix="/v1")
+logger = logging.getLogger(__name__)
+_PROVIDER_PRICED = frozenset({"openrouter"})
 
 
 def _new_request_id() -> str:
     return f"req_{uuid.uuid4().hex[:24]}"
+
+
+def _require_priced_model(provider: str, model: str) -> None:
+    if provider not in _PROVIDER_PRICED and not pricing_table.has_model(provider, model):
+        raise HTTPException(status_code=422, detail={
+            "code": "unpriced_model",
+            "message": f"No pricing configured for {provider}/{model}",
+        })
 
 
 def _compute_cost(
@@ -46,11 +57,11 @@ def _compute_cost(
     provider_reported_usd: Optional[float] = None,
     *, cache_ttl: Optional[str] = None,
 ) -> CostBlock:
-    """Build the cost envelope: YAML-computed cost, falling back to provider-reported cost.
+    """Build the cost envelope, with a provider-reported fallback for OpenRouter.
 
     computed_usd is always the figure callers should use: it comes from YAML pricing
-    when available, otherwise from provider_reported_usd. provider_reported_usd is kept
-    alongside as the raw provider figure for reference/auditing.
+    when available, otherwise from OpenRouter's provider_reported_usd. The raw
+    provider figure is kept alongside for reference/auditing.
     """
     try:
         cost = pricing_table.compute_cost(
@@ -65,6 +76,9 @@ def _compute_cost(
             cache_ttl=cache_ttl,
         )
     except UnknownModelError:
+        if provider not in _PROVIDER_PRICED:
+            logger.error("Missing pricing after provider call for %s/%s; refusing to record a zero cost", provider, model)
+            raise
         cost = CostBlock(computed_usd=provider_reported_usd or 0.0)
     if provider_reported_usd is not None:
         cost = cost.model_copy(update={"provider_reported_usd": provider_reported_usd})
@@ -151,6 +165,9 @@ async def chat(
     request_id = request.headers.get("x-request-id") or _new_request_id()
     print(f"[chat] request: {body.model_dump_json(indent=2)}")
     normalised = await normalise(body, db, tenant.id)
+    # Batch admission is a separate path; this check covers synchronous chat.
+    if not (body.metadata and body.metadata.get("batch") is True):
+        _require_priced_model(normalised.provider, normalised.model)
     try:
         tenant_key = await secret_backend.get_key(tenant.id, normalised.provider)
     except MissingTenantKeyError:
@@ -263,6 +280,7 @@ async def chat_stream(
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
     normalised = await normalise(body, db, tenant.id)
+    _require_priced_model(normalised.provider, normalised.model)
     try:
         tenant_key = await secret_backend.get_key(tenant.id, normalised.provider)
     except MissingTenantKeyError:

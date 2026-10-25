@@ -91,7 +91,7 @@ def haiku_usage():
 def test_pricing_haiku_55_low_tier(haiku_usage):
     cost = chat_api._compute_cost("anthropic", "claude-haiku-5-5", haiku_usage)
     assert cost.computed_usd == pytest.approx(0.0105)
-    assert cost.pricing_version == 3
+    assert cost.pricing_version == 4
 
 
 # (b) One token over the threshold reprices the entire request, including output.
@@ -174,12 +174,12 @@ async def test_pricing_inclusive_cache_threshold_and_ledger(
     case = gateway(usage=usage)
     payload = _payload(await case.send(streaming), streaming)
     assert payload["cost"]["computed_usd"] == pytest.approx(expected)
-    assert payload["cost"]["pricing_version"] == 3
+    assert payload["cost"]["pricing_version"] == 4
     assert payload["usage"] == usage.model_dump()
     assert len(case.entries) == 1
     entry = case.entries[0]
     assert entry.our_cost_usd == pytest.approx(expected)
-    assert entry.pricing_version == 3
+    assert entry.pricing_version == 4
     assert entry.tokens_in == tokens_in
     assert entry.input_tokens_cache_read == read
     assert entry.input_tokens_cache_write == five_m + one_h

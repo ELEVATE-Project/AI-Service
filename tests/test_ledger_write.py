@@ -181,7 +181,7 @@ async def test_cache_read_cost_preserves_usage_and_ledger_tokens(feature) -> Non
     before = usage.model_dump()
     cost = _compute_cost("anthropic", "claude-haiku-4-5", usage)
     assert cost.computed_usd == pytest.approx(0.0042 + 10 * 0.005 / 1000)
-    assert cost.pricing_version == 3
+    assert cost.pricing_version == 4
     assert usage.model_dump() == before
     assert usage.input_tokens == 33000
     assert usage.input_tokens_cache_read == 32000

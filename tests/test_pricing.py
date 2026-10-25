@@ -198,16 +198,15 @@ def test_pricing_haiku_55_source_and_date():
     assert rates["last_updated"] == "2026-10-25"
 
 
-# (g) OpenRouter Claude models have a YAML fallback, but OpenRouter's own non-zero
-# figure always wins, so a static rate can never lower the recorded (budgeted) cost.
+# (g) OpenRouter Claude models have a YAML fallback. The recorded cost is the higher of
+# the YAML cost and OpenRouter's figure, so neither can lower what the budget counts.
 @pytest.mark.parametrize("reported,expected", [
-    (0.0042, 0.0042),    # provider figure below YAML (0.006): provider still wins
-    (0.02, 0.02),        # provider figure above YAML: provider wins
-    (0.0001, 0.0001),    # provider figure far below YAML: provider still wins
-    (None, 0.006),      # stream dropped the figure: YAML fallback
-    (0.0, 0.006),       # zero on a priced model is treated as missing: YAML fallback
+    (0.02, 0.02),        # provider figure above YAML (0.006): provider figure
+    (0.0042, 0.006),     # provider figure below YAML: YAML cost
+    (0.0, 0.006),        # zero: YAML cost
+    (None, 0.006),       # stream dropped the figure: YAML cost
 ])
-def test_pricing_openrouter_priced_model_prefers_reported_cost(reported, expected):
+def test_pricing_openrouter_priced_model_never_under_records(reported, expected):
     usage = UsageBlock(input_tokens=1000, output_tokens=1000, total_tokens=2000)
     cost = chat_api._compute_cost("openrouter", "anthropic/claude-haiku-4.5", usage, reported)
     assert cost.computed_usd == pytest.approx(expected)

@@ -59,9 +59,11 @@ def _compute_cost(
 ) -> CostBlock:
     """Build the cost envelope, with a provider-reported fallback for OpenRouter.
 
-    computed_usd is always the figure callers should use: it comes from YAML pricing
-    when available, otherwise from OpenRouter's provider_reported_usd. The raw
-    provider figure is kept alongside for reference/auditing.
+    computed_usd is always the figure callers should use. For OpenRouter it is the
+    provider's own non-zero figure; YAML pricing is only the fallback when that is
+    missing or zero (LiteLLM can drop it on streams), so a static YAML rate can never
+    lower what OpenRouter charged. For every other provider it comes from YAML. The
+    raw provider figure is kept alongside for reference/auditing.
     """
     try:
         cost = pricing_table.compute_cost(
@@ -82,6 +84,8 @@ def _compute_cost(
         cost = CostBlock(computed_usd=provider_reported_usd or 0.0)
     if provider_reported_usd is not None:
         cost = cost.model_copy(update={"provider_reported_usd": provider_reported_usd})
+        if provider in _PROVIDER_PRICED and provider_reported_usd > 0:
+            cost = cost.model_copy(update={"computed_usd": provider_reported_usd})
     return cost
 
 

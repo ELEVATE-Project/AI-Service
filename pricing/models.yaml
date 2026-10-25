@@ -62,6 +62,7 @@ models:
     input_rate_per_1k_tokens: 0.001
     output_rate_per_1k_tokens: 0.005
     cache_write_rate_per_1k_tokens: 0.00125
+    cache_write_1h_rate_per_1k_tokens: 0.002
     cache_read_rate_per_1k_tokens: 0.0001
     last_updated: "2026-10-25"
     source_url: "https://openrouter.ai/api/v1/models"
@@ -70,7 +71,16 @@ models:
     input_rate_per_1k_tokens: 0.0001
     output_rate_per_1k_tokens: 0.0005
     cache_write_rate_per_1k_tokens: 0.000125
+    cache_write_1h_rate_per_1k_tokens: 0.0002
     cache_read_rate_per_1k_tokens: 1e-05
+    # Same >100k tier as the direct Anthropic entry (OpenRouter's catalog lists flat rates only).
+    long_prompt_tier:
+      threshold_tokens: 100000
+      input_rate_per_1k_tokens: 0.0005
+      output_rate_per_1k_tokens: 0.0025
+      cache_write_rate_per_1k_tokens: 0.000625
+      cache_write_1h_rate_per_1k_tokens: 0.001
+      cache_read_rate_per_1k_tokens: 0.00005
     last_updated: "2026-10-25"
     source_url: "https://openrouter.ai/api/v1/models"
 
@@ -78,6 +88,7 @@ models:
     input_rate_per_1k_tokens: 0.003
     output_rate_per_1k_tokens: 0.015
     cache_write_rate_per_1k_tokens: 0.00375
+    cache_write_1h_rate_per_1k_tokens: 0.006
     cache_read_rate_per_1k_tokens: 0.0003
     last_updated: "2026-10-25"
     source_url: "https://openrouter.ai/api/v1/models"
@@ -86,6 +97,7 @@ models:
     input_rate_per_1k_tokens: 0.002
     output_rate_per_1k_tokens: 0.01
     cache_write_rate_per_1k_tokens: 0.0025
+    cache_write_1h_rate_per_1k_tokens: 0.004
     cache_read_rate_per_1k_tokens: 0.0001
     last_updated: "2026-10-25"
     source_url: "https://openrouter.ai/api/v1/models"

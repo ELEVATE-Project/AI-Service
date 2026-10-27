@@ -91,7 +91,7 @@ def haiku_usage():
 def test_pricing_haiku_55_low_tier(haiku_usage):
     cost = chat_api._compute_cost("anthropic", "claude-haiku-5-5", haiku_usage)
     assert cost.computed_usd == pytest.approx(0.0105)
-    assert cost.pricing_version == 3
+    assert cost.pricing_version == 4
 
 
 # (b) One token over the threshold reprices the entire request, including output.
@@ -174,12 +174,12 @@ async def test_pricing_inclusive_cache_threshold_and_ledger(
     case = gateway(usage=usage)
     payload = _payload(await case.send(streaming), streaming)
     assert payload["cost"]["computed_usd"] == pytest.approx(expected)
-    assert payload["cost"]["pricing_version"] == 3
+    assert payload["cost"]["pricing_version"] == 4
     assert payload["usage"] == usage.model_dump()
     assert len(case.entries) == 1
     entry = case.entries[0]
     assert entry.our_cost_usd == pytest.approx(expected)
-    assert entry.pricing_version == 3
+    assert entry.pricing_version == 4
     assert entry.tokens_in == tokens_in
     assert entry.input_tokens_cache_read == read
     assert entry.input_tokens_cache_write == five_m + one_h
@@ -196,3 +196,18 @@ def test_pricing_haiku_55_source_and_date():
     rates = pricing_table._models["anthropic/claude-haiku-5-5"]
     assert rates["source_url"] == "https://platform.claude.com/docs/en/about-claude/pricing"
     assert rates["last_updated"] == "2026-10-25"
+
+
+# (g) OpenRouter Claude models have a YAML fallback. The recorded cost is the higher of
+# the YAML cost and OpenRouter's figure, so neither can lower what the budget counts.
+@pytest.mark.parametrize("reported,expected", [
+    (0.02, 0.02),        # provider figure above YAML (0.006): provider figure
+    (0.0042, 0.006),     # provider figure below YAML: YAML cost
+    (0.0, 0.006),        # zero: YAML cost
+    (None, 0.006),       # stream dropped the figure: YAML cost
+])
+def test_pricing_openrouter_priced_model_never_under_records(reported, expected):
+    usage = UsageBlock(input_tokens=1000, output_tokens=1000, total_tokens=2000)
+    cost = chat_api._compute_cost("openrouter", "anthropic/claude-haiku-4.5", usage, reported)
+    assert cost.computed_usd == pytest.approx(expected)
+    assert cost.provider_reported_usd == reported

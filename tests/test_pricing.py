@@ -211,3 +211,15 @@ def test_pricing_openrouter_priced_model_never_under_records(reported, expected)
     cost = chat_api._compute_cost("openrouter", "anthropic/claude-haiku-4.5", usage, reported)
     assert cost.computed_usd == pytest.approx(expected)
     assert cost.provider_reported_usd == reported
+
+
+# (h) PyYAML reads `1e-05` (no dot) as a string, which breaks cost maths at call time.
+def test_pricing_every_yaml_rate_is_a_number():
+    def check(key, rates):
+        for name, value in rates.items():
+            if name == "long_prompt_tier":
+                check(f"{key}.long_prompt_tier", value)
+            elif name.endswith(("_rate_per_1k_tokens", "_tokens")):
+                assert isinstance(value, (int, float)), f"{key}.{name} is {value!r}"
+    for key, rates in pricing_table._models.items():
+        check(key, rates)

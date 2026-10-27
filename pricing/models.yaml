@@ -72,7 +72,7 @@ models:
     output_rate_per_1k_tokens: 0.0005
     cache_write_rate_per_1k_tokens: 0.000125
     cache_write_1h_rate_per_1k_tokens: 0.0002
-    cache_read_rate_per_1k_tokens: 1e-05
+    cache_read_rate_per_1k_tokens: 0.00001
     # Same >100k tier as the direct Anthropic entry (OpenRouter's catalog lists flat rates only).
     long_prompt_tier:
       threshold_tokens: 100000

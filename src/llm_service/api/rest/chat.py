@@ -326,6 +326,7 @@ async def chat_stream(
             guardrails=cached.guardrails,
             policy=cached.policy,
             citations=cached.choices[0].message.citations,
+            thinking_blocks=cached.choices[0].message.thinking_blocks,
         )
 
         async def _cached_stream() -> AsyncIterator[str]:
@@ -356,6 +357,7 @@ async def chat_stream(
 
         final_citations: Optional[list] = None
         final_reported_cost: Optional[float] = None
+        final_thinking_blocks: Optional[list] = None
 
         async for event in transport.stream(normalised, tenant_key):
             print(f"[stream] chunk type: {event.type}, data type: {type(event.data).__name__}, data: {event.data}")
@@ -379,6 +381,7 @@ async def chat_stream(
                 final_finish_reason = finish_data.finish_reason
                 final_citations = finish_data.citations
                 final_reported_cost = finish_data.provider_reported_usd
+                final_thinking_blocks = finish_data.thinking_blocks
                 upstream_cache_hit = (final_usage.input_tokens_cache_read or 0) > 0
             elif event.type == "error":
                 error_data: ErrorData = event.data
@@ -419,6 +422,7 @@ async def chat_stream(
             ),
             policy=PolicyBlock(),
             citations=final_citations,
+            thinking_blocks=final_thinking_blocks,
         )
         yield f"event: finish\ndata: {finish.model_dump_json()}\n\n"
 
@@ -440,6 +444,7 @@ async def chat_stream(
                     content=accumulated_content or None,
                     tool_calls=tool_calls,
                     citations=final_citations,
+                    thinking_blocks=final_thinking_blocks,
                 ),
                 finish_reason=final_finish_reason,
             )],

@@ -35,6 +35,9 @@ class MessageParam(BaseModel):
     cache: Optional[str] = None
     tool_calls: Optional[list[dict[str, Any]]] = None
     tool_call_id: Optional[str] = None
+    # Opaque provider blocks: Anthropic thinking/redacted_thinking, or OpenRouter
+    # reasoning_details. Re-send unchanged on the assistant turn with tool_calls.
+    thinking_blocks: Optional[list[dict[str, Any]]] = None
 
 
 class ToolFunction(BaseModel):
@@ -103,6 +106,12 @@ class RetryOptions(BaseModel):
     backoff_base_s: Optional[float] = Field(default=None, ge=0.0, le=RETRY_BACKOFF_BASE_S_CEILING)
 
 
+class OutputConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    effort: Optional[Literal["low", "medium", "high"]] = None
+
+
 class ChatParams(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
@@ -114,6 +123,8 @@ class ChatParams(BaseModel):
     web_search_options: Optional[WebSearchOptions] = None
     cache_options: Optional[CacheOptions] = None
     retry: Optional[RetryOptions] = None
+    thinking: Optional[dict[str, Any]] = None
+    output_config: Optional[OutputConfig] = None
 
 
 class ChatRequest(BaseModel):
@@ -151,6 +162,8 @@ class ChoiceMessage(BaseModel):
     content: Optional[str] = None
     tool_calls: Optional[list[dict[str, Any]]] = None
     citations: Optional[list[Any]] = None
+    # Same raw provider shape as MessageParam.thinking_blocks; never display as text.
+    thinking_blocks: Optional[list[dict[str, Any]]] = None
 
 
 class Choice(BaseModel):
@@ -208,6 +221,7 @@ class FinishData(BaseModel):
     guardrails: GuardrailsBlock
     policy: PolicyBlock
     citations: Optional[list[Any]] = None
+    thinking_blocks: Optional[list[dict[str, Any]]] = None
 
 
 class ErrorData(BaseModel):

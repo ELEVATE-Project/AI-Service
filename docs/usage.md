@@ -88,6 +88,32 @@ Returns the full response in one go.
 | `cache_options` | `object` | Opt-in automatic provider-side prompt caching. Fields: `enabled` (`bool`), `ttl` (`string`, `"5m"` or `"1h"`), `targets` (`string[]`, `"prompt"` and/or `"tools"`). See [Provider Layer → Prompt caching](providers.md#prompt-caching); current supported values are also served live at `GET /v1/cache/options`. |
 | `retry` | `object` | Per-request override of the service-wide retry defaults. Fields: `enabled` (`bool` — `false` forces a single attempt, no retry), `max_attempts` (`int`, `1`–`10`), `backoff_base_s` (`float`, seconds, `0`–`60`) — out-of-range values are rejected with `422`, not clamped. Only applies to the fixed set of retryable upstream error types (timeouts, rate limits, 5xx) — a non-retryable error (e.g. an invalid model ID) still fails on the first attempt regardless of these values. See [Provider Layer → LiteLLMTransport](providers.md#litellmtransport). |
 
+**Thinking and effort (Haiku 5.5)**
+
+Send `params.thinking: {"type": "adaptive"}` and
+`params.output_config: {"effort": "low"}` to request adaptive thinking with low
+effort. Effort accepts only `low`, `medium`, or `high`. The gateway adds neither
+setting when omitted and adds no sampling defaults.
+
+For provider `anthropic`, model `claude-haiku-5-5`, these objects pass through
+unchanged. For provider `openrouter`, model `anthropic/claude-haiku-5.5`, they
+become `reasoning: {"enabled": true, "effort": "low"}`. An explicit thinking
+type of `disabled` maps to `enabled: false`; `budget_tokens` maps to
+`reasoning.max_tokens`. Supplying effort alone sends only `reasoning.effort`.
+
+Responses expose an optional `choices[].message.thinking_blocks` array.
+Anthropic returns raw `thinking` and `redacted_thinking` content blocks.
+OpenRouter returns its raw `reasoning_details` objects, retaining IDs, indices,
+formats, signatures, and encrypted data. Re-send this array unchanged as
+`messages[].thinking_blocks` on the assistant message alongside `tool_calls`.
+Keep the same provider; these shapes are provider-specific. The gateway puts
+Anthropic blocks before tool use and maps OpenRouter blocks back to
+`reasoning_details` without reordering them.
+
+Streaming returns the assembled array in the `finish` event's `thinking_blocks`
+field, including cached streams. Thinking never appears in `token` event text.
+Treat these blocks as opaque tool-loop state; do not display them to users.
+
 **Tool definition fields**
 
 | Field | Type | Description |

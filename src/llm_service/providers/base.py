@@ -31,6 +31,7 @@ class TransportFinishData:
     usage: UsageBlock
     citations: Optional[list[Any]] = None
     provider_reported_usd: Optional[float] = None
+    thinking_blocks: Optional[list[dict[str, Any]]] = None
 
 
 @dataclass

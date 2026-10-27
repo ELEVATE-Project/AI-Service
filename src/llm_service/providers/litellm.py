@@ -200,6 +200,47 @@ def _patch_anthropic_hidden_original_response() -> None:
 
 _patch_anthropic_hidden_original_response()
 
+# LiteLLM 1.83.0's bundled cost map predates Haiku 5.5. Register capability
+# locally so drop_params=True retains thinking even without a price-map download.
+# Billing continues to use pricing/models.yaml, not LiteLLM's cost map.
+litellm.register_model({
+    "anthropic/claude-haiku-5-5": {
+        "litellm_provider": "anthropic", "mode": "chat", "supports_reasoning": True,
+    },
+})
+
+
+def _thinking_blocks(message: Any) -> Optional[list[dict[str, Any]]]:
+    """Keep provider blocks opaque, including OpenRouter's IDs and format fields."""
+    fields = getattr(message, "provider_specific_fields", None) or {}
+    return (
+        getattr(message, "reasoning_details", None)
+        or fields.get("reasoning_details")
+        or getattr(message, "thinking_blocks", None)
+        or fields.get("thinking_blocks")
+    )
+
+
+def _merge_reasoning_details(
+    blocks: list[dict[str, Any]], deltas: list[dict[str, Any]],
+) -> None:
+    """OpenRouter streams fragments by block index. Keep their original order/shape."""
+    for delta in deltas:
+        existing = next((block for block in blocks if (
+            delta.get("index") is not None and block.get("index") == delta["index"]
+        ) or (
+            delta.get("index") is None and delta.get("id") is not None
+            and block.get("id") == delta["id"]
+        )), None)
+        if existing is None:
+            blocks.append(dict(delta))
+            continue
+        for key, value in delta.items():
+            if key in {"text", "summary", "data", "signature"} and isinstance(value, str):
+                existing[key] = existing.get(key, "") + value
+            else:
+                existing[key] = value
+
 
 def _dedupe_leading_narration(raw: Any, flattened_content: Optional[str]) -> Optional[str]:
     """Undo LiteLLM's lossy flattening of interleaved Anthropic content blocks.
@@ -313,7 +354,7 @@ class LiteLLMTransport(BaseLLMProvider):
             }
         raise ValueError(f"Unsupported key_format: {key.key_format!r}")
 
-    def _param_kwargs(self, params: Optional[Any]) -> dict[str, Any]:
+    def _param_kwargs(self, params: Optional[Any], provider: str = "") -> dict[str, Any]:
         if not params:
             return {}
         kwargs: dict[str, Any] = {}
@@ -333,6 +374,13 @@ class LiteLLMTransport(BaseLLMProvider):
             )
         if params.web_search_options is not None:
             kwargs["web_search_options"] = params.web_search_options.model_dump(exclude_none=True)
+        # Never use reasoning_effort for Anthropic: 1.83.0 translates it to the
+        # old thinking.budget_tokens format, rejected by Haiku 5.5.
+        if provider != "openrouter":
+            if params.thinking is not None:
+                kwargs["thinking"] = params.thinking
+            if params.output_config is not None:
+                kwargs["output_config"] = params.output_config.model_dump(exclude_none=True)
         return kwargs
 
     def _openrouter_kwargs(self, request: NormalisedLLMRequest) -> dict[str, Any]:
@@ -353,6 +401,20 @@ class LiteLLMTransport(BaseLLMProvider):
         options = request.provider_options or {}
 
         extra_body: dict[str, Any] = {}
+        if request.params is not None:
+            reasoning: dict[str, Any] = {}
+            thinking = request.params.thinking
+            if thinking is not None:
+                if thinking.get("type") in {"adaptive", "enabled", "disabled"}:
+                    reasoning["enabled"] = thinking["type"] != "disabled"
+                if thinking.get("budget_tokens") is not None:
+                    reasoning["max_tokens"] = thinking["budget_tokens"]
+            output = request.params.output_config
+            if output is not None and output.effort is not None:
+                reasoning["effort"] = output.effort
+            if reasoning:
+                # Bypass LiteLLM's model-dependent reasoning_effort conversion.
+                extra_body["reasoning"] = reasoning
         if options.get("provider") is not None:
             extra_body["provider"] = options["provider"]
         if options.get("models") is not None:
@@ -409,6 +471,8 @@ class LiteLLMTransport(BaseLLMProvider):
         result: list[dict[str, Any]] = []
         for i, message in enumerate(messages):
             serialised = message.model_dump(exclude={"cache"}, exclude_none=True)
+            if provider == "openrouter" and "thinking_blocks" in serialised:
+                serialised["reasoning_details"] = serialised.pop("thinking_blocks")
             should_cache = message.cache == "ephemeral" or i == last_system_idx
             if not should_cache or provider not in CACHE_CAPABLE_PROVIDERS:
                 result.append(serialised)
@@ -535,6 +599,7 @@ class LiteLLMTransport(BaseLLMProvider):
                     content=content,
                     tool_calls=tool_calls,
                     citations=citations,
+                    thinking_blocks=_thinking_blocks(raw_message),
                 ),
                 finish_reason=raw_choice.finish_reason or "stop",
             ))
@@ -546,7 +611,7 @@ class LiteLLMTransport(BaseLLMProvider):
         model_str = self._model_string(request.provider, request.model)
         messages = self._serialize_messages(request.messages, request.provider, request.params)
         credential_kwargs = self._credential_kwargs(key)
-        param_kwargs = self._param_kwargs(request.params)
+        param_kwargs = self._param_kwargs(request.params, request.provider)
 
         if self._regions:
             if "aws_region_name" in credential_kwargs:
@@ -615,7 +680,7 @@ class LiteLLMTransport(BaseLLMProvider):
         model_str = self._model_string(request.provider, request.model)
         messages = self._serialize_messages(request.messages, request.provider, request.params)
         credential_kwargs = self._credential_kwargs(key)
-        param_kwargs = self._param_kwargs(request.params)
+        param_kwargs = self._param_kwargs(request.params, request.provider)
 
         if self._regions:
             if "aws_region_name" in credential_kwargs:
@@ -674,6 +739,8 @@ class LiteLLMTransport(BaseLLMProvider):
         final_citations: Optional[list[Any]] = None
         reported_cost: Optional[float] = None
         all_chunks: list[Any] = []
+        final_thinking_blocks: Optional[list[dict[str, Any]]] = None
+        reasoning_details: list[dict[str, Any]] = []
 
         # Once iteration starts we cannot retry — emit an error event on failure.
         try:
@@ -689,6 +756,10 @@ class LiteLLMTransport(BaseLLMProvider):
                     continue
 
                 choice = chunk.choices[0]
+                if request.provider == "openrouter":
+                    details = _thinking_blocks(choice.delta)
+                    if details:
+                        _merge_reasoning_details(reasoning_details, details)
                 delta_content = getattr(choice.delta, "content", None) or ""
 
                 if delta_content:
@@ -740,6 +811,7 @@ class LiteLLMTransport(BaseLLMProvider):
                 if assembled and assembled.choices:
                     assembled_message = assembled.choices[0].message
                     final_citations = self._normalize_citations(assembled_message)
+                    final_thinking_blocks = _thinking_blocks(assembled_message)
                     if reported_cost is None:
                         reported_cost = _extract_response_cost(assembled)
             except Exception:
@@ -752,6 +824,7 @@ class LiteLLMTransport(BaseLLMProvider):
                 usage=final_usage,
                 citations=final_citations,
                 provider_reported_usd=reported_cost,
+                thinking_blocks=reasoning_details or final_thinking_blocks,
             ),
         )
 

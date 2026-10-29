@@ -90,13 +90,34 @@ def _compute_cost(
     return cost
 
 
+# Request metadata keys copied into the ledger row, so a row joins to a session, bot and call kind.
+# `metadata` stays optional: a caller that sends none works as before and its row keeps NULLs.
+# Only this ledger copy is filtered; the request passed on is not changed.
+LEDGER_METADATA_KEYS = ("session_id", "bot_id", "bot_history_id", "turn_id", "call_kind", "language", "batch")
+LEDGER_METADATA_MAX_CHARS = 64
+
+
+def _ledger_metadata(metadata: Optional[dict]) -> Optional[dict]:
+    """Allow-listed scalar values from the request metadata; strings over the limit are dropped."""
+    if not metadata:
+        return None
+    kept = {}
+    for key in LEDGER_METADATA_KEYS:
+        value = metadata.get(key)
+        if isinstance(value, str) and len(value) <= LEDGER_METADATA_MAX_CHARS:
+            kept[key] = value
+        elif isinstance(value, (bool, int, float)):
+            kept[key] = value
+    return kept or None
+
+
 async def _write_ledger_entry(
     db: AsyncSession, *, request_id: str, tenant_id: str, provider: str, model: str,
     feature: Feature, status: LedgerStatus, latency_ms: int,
     usage: Optional["UsageBlock"] = None, cost: Optional[CostBlock] = None,
     time_to_first_token_ms: Optional[int] = None, error_code: Optional[str] = None,
     our_cache_hit: bool = False, guardrail_flags: Optional[dict] = None,
-    provider_reported_usage: Optional[dict] = None,
+    provider_reported_usage: Optional[dict] = None, call_metadata: Optional[dict] = None,
 ) -> None:
     """Write one audit row to ledger_entries.
 
@@ -134,6 +155,9 @@ async def _write_ledger_entry(
             our_cache_hit=our_cache_hit,
             batched=False,
             guardrail_flags=guardrail_flags,
+            call_metadata=call_metadata,
+            session_id=(str(call_metadata["session_id"])
+                        if call_metadata and "session_id" in call_metadata else None),
         )
 
     db.add(_build_entry(request_id))
@@ -168,6 +192,7 @@ async def chat(
 ) -> Union[ChatResponse, JSONResponse]:
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
+    call_metadata = _ledger_metadata(body.metadata)
     print(f"[chat] request: {body.model_dump_json(indent=2)}")
     normalised = await normalise(body, db, tenant.id)
     # Batch admission is a separate path; this check covers synchronous chat.
@@ -196,7 +221,7 @@ async def chat(
     cached = await cache.get(cache_key)
     if cached:
         await _write_ledger_entry(
-            db, request_id=request_id, tenant_id=tenant.id,
+            db, request_id=request_id, tenant_id=tenant.id, call_metadata=call_metadata,
             provider=normalised.provider, model=normalised.model,
             feature=Feature.CHAT, status=LedgerStatus.SUCCESS,
             latency_ms=int((time.monotonic() - start) * 1000),
@@ -232,7 +257,7 @@ async def chat(
         response = await transport.chat(normalised, tenant_key)
     except UpstreamTransportError as upstream_error:
         await _write_ledger_entry(
-            db, request_id=request_id, tenant_id=tenant.id,
+            db, request_id=request_id, tenant_id=tenant.id, call_metadata=call_metadata,
             provider=normalised.provider, model=normalised.model,
             feature=Feature.CHAT, status=LedgerStatus.ERROR,
             latency_ms=int((time.monotonic() - start) * 1000),
@@ -261,7 +286,7 @@ async def chat(
                    if normalised.params and normalised.params.cache_options else None),
     )
     await _write_ledger_entry(
-        db, request_id=request_id, tenant_id=tenant.id,
+        db, request_id=request_id, tenant_id=tenant.id, call_metadata=call_metadata,
         provider=normalised.provider, model=normalised.model,
         feature=Feature.CHAT, status=LedgerStatus.SUCCESS,
         latency_ms=elapsed_ms, usage=response.usage, cost=response.cost,
@@ -284,6 +309,7 @@ async def chat_stream(
 ) -> StreamingResponse:
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
+    call_metadata = _ledger_metadata(body.metadata)
     normalised = await normalise(body, db, tenant.id)
     _require_priced_model(normalised.provider, normalised.model)
     try:
@@ -308,7 +334,7 @@ async def chat_stream(
     cached = await cache.get(cache_key)
     if cached:
         await _write_ledger_entry(
-            db, request_id=request_id, tenant_id=tenant.id,
+            db, request_id=request_id, tenant_id=tenant.id, call_metadata=call_metadata,
             provider=normalised.provider, model=normalised.model,
             feature=Feature.STREAM, status=LedgerStatus.SUCCESS,
             latency_ms=int((time.monotonic() - start) * 1000),
@@ -386,7 +412,7 @@ async def chat_stream(
             elif event.type == "error":
                 error_data: ErrorData = event.data
                 await _write_ledger_entry(
-                    db, request_id=request_id, tenant_id=tenant.id,
+                    db, request_id=request_id, tenant_id=tenant.id, call_metadata=call_metadata,
                     provider=normalised.provider, model=normalised.model,
                     feature=Feature.STREAM, status=LedgerStatus.ERROR,
                     latency_ms=int((time.monotonic() - start) * 1000),
@@ -457,7 +483,7 @@ async def chat_stream(
         )
         await cache.set(cache_key, cached_response, ttl_seconds=settings.cache_ttl_seconds)
         await _write_ledger_entry(
-            db, request_id=request_id, tenant_id=tenant.id,
+            db, request_id=request_id, tenant_id=tenant.id, call_metadata=call_metadata,
             provider=normalised.provider, model=normalised.model,
             feature=Feature.STREAM, status=LedgerStatus.SUCCESS,
             latency_ms=elapsed_ms, time_to_first_token_ms=first_token_ms,

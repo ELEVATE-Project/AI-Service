@@ -245,7 +245,8 @@ async def chat(
             our_cache_hit=True,
             provider_reported_usage=(cached.provider_raw or {}).get("usage") or cached.usage.model_dump(),
         )
-        return cached.model_copy(update={"cache": CacheBlock(our_cache_hit=True)})
+        # The id is this request's id (the one on its ledger row), as on a live call and a stream cache hit.
+        return cached.model_copy(update={"id": request_id, "cache": CacheBlock(our_cache_hit=True)})
 
     if body.metadata and body.metadata.get("batch") is True:
         if normalised.provider not in BATCH_ELIGIBLE_PROVIDERS:

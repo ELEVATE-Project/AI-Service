@@ -131,6 +131,19 @@ async def test_metadata_is_not_changed_for_the_upstream_call(gateway):
     assert sent.metadata == METADATA
 
 
+@pytest.mark.asyncio
+async def test_chat_cache_hit_returns_this_requests_id(gateway):
+    gw = gateway(cached=_response())
+    response = await gw.send(metadata=METADATA)
+    assert response.json()["id"] == gw.entries[0].request_id
+    assert response.json()["id"] != "upstream-id"
+
+
+def test_absent_call_metadata_is_sql_null():
+    from src.shared.db.models import LedgerEntry
+    assert LedgerEntry.__table__.c.call_metadata.type.none_as_null is True
+
+
 def test_ledger_metadata_keeps_allowed_short_scalars_only():
     assert chat_api._ledger_metadata(None) is None
     assert chat_api._ledger_metadata({}) is None

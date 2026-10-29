@@ -266,7 +266,7 @@ class LedgerEntry(Base):
     )
     # Optional and additive: rows from callers that send no request metadata keep both NULL.
     call_metadata: Mapped[Optional[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=True,
+        JSONB(none_as_null=True), nullable=True,
         comment="Allow-listed ids from the request metadata (session, bot, turn, call kind). Ids only, never text.",
     )
     session_id: Mapped[Optional[str]] = mapped_column(

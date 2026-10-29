@@ -139,3 +139,38 @@ def test_ledger_metadata_keeps_allowed_short_scalars_only():
         "session_id": "x" * 65, "turn_id": ["a"], "bot_id": {"id": 1}, "call_kind": "retry", "batch": True,
     }) == {"call_kind": "retry", "batch": True}
     assert chat_api._ledger_metadata({"session_id": 12}) == {"session_id": 12}
+    assert chat_api._ledger_metadata({
+        "bot_id": float("nan"), "turn_id": float("inf"), "language": 1.5,
+        "session_id": 2 ** 60, "call_kind": "an\x00swer",
+    }) is None
+
+
+class _FailingOnceSession:
+    def __init__(self):
+        self.added, self.commits, self.rollbacks = [], 0, 0
+
+    def add(self, obj):
+        self.added.append(obj)
+
+    async def commit(self):
+        self.commits += 1
+        if self.commits == 1:
+            raise ValueError("bad metadata")
+
+    async def rollback(self):
+        self.rollbacks += 1
+
+
+@pytest.mark.asyncio
+async def test_failed_write_is_retried_without_metadata():
+    db = _FailingOnceSession()
+    await chat_api._write_ledger_entry(
+        db, request_id="req-1", tenant_id="t", provider="anthropic", model="m",
+        feature=chat_api.Feature.CHAT, status=chat_api.LedgerStatus.ERROR, latency_ms=1,
+        call_metadata={"session_id": "s"},
+    )
+    assert db.commits == 2
+    assert db.added[0].session_id == "s"
+    assert db.added[1].request_id == "req-1"
+    assert db.added[1].call_metadata is None
+    assert db.added[1].session_id is None

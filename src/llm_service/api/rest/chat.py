@@ -95,18 +95,25 @@ def _compute_cost(
 # Only this ledger copy is filtered; the request passed on is not changed.
 LEDGER_METADATA_KEYS = ("session_id", "bot_id", "bot_history_id", "turn_id", "call_kind", "language", "batch")
 LEDGER_METADATA_MAX_CHARS = 64
+LEDGER_METADATA_MAX_INT = 2 ** 53
 
 
 def _ledger_metadata(metadata: Optional[dict]) -> Optional[dict]:
-    """Allow-listed scalar values from the request metadata; strings over the limit are dropped."""
+    """Allow-listed ids from the request metadata: short strings, booleans and safe integers.
+
+    Anything else is dropped (floats, NaN, huge ints, NUL bytes, nested values), so the
+    value can't make the JSONB/text write fail and lose the billing row.
+    """
     if not metadata:
         return None
     kept = {}
     for key in LEDGER_METADATA_KEYS:
         value = metadata.get(key)
-        if isinstance(value, str) and len(value) <= LEDGER_METADATA_MAX_CHARS:
+        if isinstance(value, bool):
             kept[key] = value
-        elif isinstance(value, (bool, int, float)):
+        elif isinstance(value, int) and abs(value) < LEDGER_METADATA_MAX_INT:
+            kept[key] = value
+        elif isinstance(value, str) and len(value) <= LEDGER_METADATA_MAX_CHARS and "\x00" not in value:
             kept[key] = value
     return kept or None
 
@@ -131,7 +138,8 @@ async def _write_ledger_entry(
     so on a unique-constraint violation we retry once with a disambiguated id rather
     than treating it as an already-recorded duplicate.
     """
-    def _build_entry(entry_request_id: str) -> LedgerEntry:
+    def _build_entry(entry_request_id: str, with_metadata: bool = True) -> LedgerEntry:
+        stored_metadata = call_metadata if with_metadata else None
         return LedgerEntry(
             request_id=entry_request_id,
             tenant_id=tenant_id,
@@ -155,9 +163,9 @@ async def _write_ledger_entry(
             our_cache_hit=our_cache_hit,
             batched=False,
             guardrail_flags=guardrail_flags,
-            call_metadata=call_metadata,
-            session_id=(str(call_metadata["session_id"])
-                        if call_metadata and "session_id" in call_metadata else None),
+            call_metadata=stored_metadata,
+            session_id=(str(stored_metadata["session_id"])
+                        if stored_metadata and "session_id" in stored_metadata else None),
         )
 
     db.add(_build_entry(request_id))
@@ -170,6 +178,14 @@ async def _write_ledger_entry(
     except Exception as exc:
         print(f"[ledger] write failed for request_id={request_id}: {exc!r}")
         await db.rollback()
+        if call_metadata:
+            # Billing comes first: keep the row, without the optional metadata.
+            db.add(_build_entry(request_id, with_metadata=False))
+            try:
+                await db.commit()
+            except Exception as retry_exc:
+                print(f"[ledger] write without metadata failed for request_id={request_id}: {retry_exc!r}")
+                await db.rollback()
         return
 
     disambiguated_id = f"{request_id}:dup:{uuid.uuid4().hex[:8]}"

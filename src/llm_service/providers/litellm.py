@@ -537,7 +537,14 @@ class LiteLLMTransport(BaseLLMProvider):
         def _split_count(name: str) -> Optional[int]:
             return split.get(name) if isinstance(split, dict) else getattr(split, name, None)
 
+        server_tool_use = getattr(raw_usage, "server_tool_use", None)
+        web_search_requests = (
+            server_tool_use.get("web_search_requests") if isinstance(server_tool_use, dict)
+            else getattr(server_tool_use, "web_search_requests", None)
+        )
+
         return UsageBlock(
+            web_search_requests=web_search_requests,
             input_tokens=getattr(raw_usage, "prompt_tokens", 0) or 0,
             output_tokens=getattr(raw_usage, "completion_tokens", 0) or 0,
             input_tokens_cache_read=cache_read or None,

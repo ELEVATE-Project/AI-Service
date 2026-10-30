@@ -82,3 +82,15 @@ def test_gateway_adds_no_web_plugin_when_the_tool_is_sent_without_web_search_opt
     kwargs = transport._openrouter_kwargs(request)
     assert "plugins" not in kwargs.get("extra_body", {})
     assert transport._serialize_tools(request.tools, "openrouter", request.params) == [OPENROUTER_TOOL]
+
+
+def test_usage_block_passes_on_the_web_search_count() -> None:
+    """The backend caps searches per turn from this count (T28); an absent count stays None."""
+    from types import SimpleNamespace
+
+    transport = LiteLLMTransport()
+    with_object = SimpleNamespace(prompt_tokens=1, server_tool_use=SimpleNamespace(web_search_requests=2))
+    with_dict = SimpleNamespace(prompt_tokens=1, server_tool_use={"web_search_requests": 1})
+    assert transport._extract_usage(SimpleNamespace(usage=with_object)).web_search_requests == 2
+    assert transport._extract_usage(SimpleNamespace(usage=with_dict)).web_search_requests == 1
+    assert transport._extract_usage(SimpleNamespace(usage=SimpleNamespace(prompt_tokens=1))).web_search_requests is None

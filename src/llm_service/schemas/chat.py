@@ -22,6 +22,8 @@ class UsageBlock(BaseModel):
     # Optional response TTL breakdown; aggregate fields retain their meaning.
     input_tokens_cache_write_5m: Optional[int] = None
     input_tokens_cache_write_1h: Optional[int] = None
+    # Web searches the model ran in this request (provider's server_tool_use count); None if not reported.
+    web_search_requests: Optional[int] = None
 
 
 class CacheBlock(BaseModel):

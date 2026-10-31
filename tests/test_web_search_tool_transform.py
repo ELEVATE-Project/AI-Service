@@ -94,3 +94,30 @@ def test_usage_block_passes_on_the_web_search_count() -> None:
     assert transport._extract_usage(SimpleNamespace(usage=with_object)).web_search_requests == 2
     assert transport._extract_usage(SimpleNamespace(usage=with_dict)).web_search_requests == 1
     assert transport._extract_usage(SimpleNamespace(usage=SimpleNamespace(prompt_tokens=1))).web_search_requests is None
+
+
+def test_usage_block_reads_the_openrouter_count_name() -> None:
+    """OpenRouter reports the count as server_tool_use_details.web_search_requests (T28)."""
+    from types import SimpleNamespace
+
+    transport = LiteLLMTransport()
+    as_dict = SimpleNamespace(prompt_tokens=1, server_tool_use_details={"web_search_requests": 2, "tool_calls_executed": 2})
+    as_object = SimpleNamespace(prompt_tokens=1, server_tool_use_details=SimpleNamespace(web_search_requests=1))
+    assert transport._extract_usage(SimpleNamespace(usage=as_dict)).web_search_requests == 2
+    assert transport._extract_usage(SimpleNamespace(usage=as_object)).web_search_requests == 1
+
+
+def test_anthropic_count_wins_and_a_zero_count_is_kept() -> None:
+    from types import SimpleNamespace
+
+    transport = LiteLLMTransport()
+    both = SimpleNamespace(
+        prompt_tokens=1,
+        server_tool_use={"web_search_requests": 3},
+        server_tool_use_details={"web_search_requests": 9},
+    )
+    zero = SimpleNamespace(prompt_tokens=1, server_tool_use_details={"web_search_requests": 0})
+    empty_box = SimpleNamespace(prompt_tokens=1, server_tool_use_details={})
+    assert transport._extract_usage(SimpleNamespace(usage=both)).web_search_requests == 3
+    assert transport._extract_usage(SimpleNamespace(usage=zero)).web_search_requests == 0
+    assert transport._extract_usage(SimpleNamespace(usage=empty_box)).web_search_requests is None

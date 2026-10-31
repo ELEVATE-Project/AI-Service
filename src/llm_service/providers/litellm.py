@@ -537,11 +537,16 @@ class LiteLLMTransport(BaseLLMProvider):
         def _split_count(name: str) -> Optional[int]:
             return split.get(name) if isinstance(split, dict) else getattr(split, name, None)
 
-        server_tool_use = getattr(raw_usage, "server_tool_use", None)
-        web_search_requests = (
-            server_tool_use.get("web_search_requests") if isinstance(server_tool_use, dict)
-            else getattr(server_tool_use, "web_search_requests", None)
-        )
+        def _search_count(box: Any) -> Optional[int]:
+            if isinstance(box, dict):
+                return box.get("web_search_requests")
+            return getattr(box, "web_search_requests", None)
+
+        # Anthropic names the count server_tool_use; OpenRouter names it
+        # server_tool_use_details (LiteLLM 1.83 keeps it as an extra attribute).
+        web_search_requests = _search_count(getattr(raw_usage, "server_tool_use", None))
+        if web_search_requests is None:
+            web_search_requests = _search_count(getattr(raw_usage, "server_tool_use_details", None))
 
         return UsageBlock(
             web_search_requests=web_search_requests,

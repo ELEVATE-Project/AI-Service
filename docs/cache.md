@@ -1,6 +1,6 @@
 # Response Cache
 
-The gateway caches LLM responses in Redis so that identical requests return instantly without spending tokens or hitting a provider.
+The gateway has an optional cache of complete LLM responses in Redis. Eligible identical requests can reuse a stored answer without calling a provider.
 
 > This page is about the gateway's own Redis response cache (`our_cache_hit`). For provider-side prompt caching (Anthropic's `cache_control`, `params.cache_options`, `upstream_prompt_cache_hit`) — a separate, orthogonal mechanism — see [Provider Layer → Prompt caching](providers.md#prompt-caching).
 
@@ -8,9 +8,19 @@ The gateway caches LLM responses in Redis so that identical requests return inst
 
 ## Why the cache exists
 
-Every upstream LLM call costs money and adds latency. Many real-world workloads repeat the same prompt — dashboards that regenerate on page load, test suites that run the same prompt dozens of times, batch jobs processing overlapping inputs. Without a cache, each of those pays the full cost every time.
+This cache can save provider calls for repeatable requests that can safely reuse an answer. It is not suitable for every chatbot turn: live information, reasoning and sampling can require a fresh response. Saathi's reasoning-enabled teacher bots bypass this cache. Keeping the cache enabled for other workloads should be justified by useful hits.
 
-The cache is an exact-match lookup keyed per tenant. If the same tenant sends the same request twice, the second response is returned from Redis in milliseconds with zero upstream spend.
+The cache is an exact-match lookup keyed per tenant. If the same tenant sends an eligible request twice before expiry, the second response can come from Redis with zero upstream spend. Batch admission bypasses this response cache.
+
+## Which responses can be reused
+
+`CACHE_TTL_SECONDS <= 0` bypasses cache reads, writes and locks entirely. With a positive expiry, neither cache reads nor writes occur for requests with:
+
+- Positive `params.temperature`.
+- Enabled `params.thinking`, or reasoning effort in `params.output_config`.
+- `params.web_search_options`, an Anthropic `web_search*` tool, an `openrouter:web_search` tool, or an OpenRouter `web` plugin.
+
+Responses containing citations, reasoning blocks or a positive web-search usage count are not stored or replayed. This also protects against a provider returning these without an explicit request flag. Provider prompt caching remains independent of these rules.
 
 ---
 
@@ -36,44 +46,39 @@ A cache hit skips the LLM call entirely. The response is returned with `"our_cac
 
 The cache key is a SHA-256 hash of these fields, canonically serialised:
 
-| Field | Included |
-|-------|----------|
-| `tenant_id` | Yes — tenant A never sees tenant B's cache |
-| `provider` | Yes |
-| `model` | Yes |
-| `messages` | Yes — full content, role, and `cache` hint |
-| `tools` | Yes — tool definitions affect the response |
-| `params` | Yes — temperature, max_tokens, top_p, stop, seed |
+- `tenant_id`, provider and model.
+- Full messages and tool definitions, including opaque provider fields.
+- `tool_choice`, including a structured choice of a specific tool.
+- Answer parameters: temperature, maximum tokens, top-p, stop, seed, search options, provider prompt-cache options, thinking and output configuration.
+- `provider_options`, including provider routing preferences and plugins.
 
 Changing any of these fields produces a different cache key and a cache miss.
 
-Fields **not** included: `metadata` (Langfuse session tracking, not sent upstream), `stream` (the same underlying response is used for both streaming and non-streaming cache replays), `tool_choice` is included in the `params` hash via the normalised request.
+Timeouts, retries and tracking metadata do not change the key. Streaming and normal chat share eligible responses. The key includes a version so entries written before the tool-choice fix cannot be replayed.
 
 ---
 
-## Stampede protection
+## Cache population locks
 
-When many identical requests arrive simultaneously (a burst of concurrent users hitting the same prompt), only one should call the upstream LLM. The others should wait and use that result.
+Cache lookup never polls for another request's answer. A request that misses the cache tries once to reserve population with a Redis lock. If another request already owns it, this request calls the provider without waiting and does not populate the cache. Concurrent misses can therefore make separate provider calls; the lock protects population rather than guaranteeing a single provider call.
 
-This is handled with a Redis distributed lock:
+The reservation has a unique owner token and a 10-second expiry:
 
 ```
 Request 1  → GET key → miss
-           → SET lock:key NX EX 10  → acquired lock
+           → SET lock:key <token-A> NX PX 10000 → acquired lock
            → proceeds to LLM call
 
 Request 2  → GET key → miss
-           → SET lock:key NX EX 10  → lock already held
-           → polls GET key every 200ms until data appears or 10s timeout
+           → reservation already held
+           → calls provider without waiting; does not populate cache
 
 Request 1  → gets LLM response
            → SET key <response> EX <ttl>
-           → DEL lock:key          ← releases lock
-
-Request 2  → sees data on next poll → returns cached response
+           → atomic compare-and-delete of lock:key if still owned by token-A
 ```
 
-If the lock holder's LLM call fails or times out, the lock expires after 10 seconds and the next waiting request acquires it and tries the upstream call itself.
+The owner releases its lock in `finally` after success, failure or stream cancellation. Cancellation while waiting for acquisition also attempts protected cleanup using the token that may already be stored. An atomic Lua comparison prevents an expired owner from deleting a newer owner's lock. Streaming acquires the lock only when the response body starts being consumed. If cleanup cannot reach Redis, the expiry remains the fallback.
 
 ---
 
@@ -83,6 +88,7 @@ All Redis operations are wrapped in `try/except`. If Redis is down or unreachabl
 
 - `get()` returns `None` — treated as a cache miss, the request proceeds normally
 - `set()` is a no-op — the response is returned to the caller but not cached
+- Failed lock acquisition also bypasses population; failed release falls back to expiry.
 
 Redis failure never crashes the request. The gateway degrades gracefully to pass-through mode.
 
@@ -90,7 +96,7 @@ Redis failure never crashes the request. The gateway degrades gracefully to pass
 
 ## Cache TTL
 
-Controlled by `CACHE_TTL_SECONDS` in `.env`. The default in production is `300` (5 minutes). Set to `0` to disable caching entirely during development.
+Controlled by `CACHE_TTL_SECONDS` in the service configuration. A value of `300` keeps an eligible response for 5 minutes. Set it to `0` to disable this cache entirely, including Redis reads and locks. Restart the service after changing the setting.
 
 ```env
 CACHE_TTL_SECONDS=300
@@ -124,7 +130,7 @@ These are independent. A request can have `our_cache_hit: false` (first time we'
 
 For streaming responses (`POST /v1/chat/stream`):
 
-- On a **cache miss**: the stream flows live from the upstream, token by token. After the stream ends, the completed response is stored in Redis for future requests.
+- On a **cache miss**: the stream flows live from the upstream, token by token. After completion, an eligible response is stored only if this request acquired the population lock.
 - On a **cache hit**: the cached response is replayed as a synthetic stream — a `token` event for the content, then a `finish` event with the full metadata. The caller sees the same SSE event sequence as a live stream.
 
 ---

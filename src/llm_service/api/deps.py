@@ -68,7 +68,7 @@ def get_guardrails() -> GuardrailsChecker:
 
 @functools.lru_cache(maxsize=1)
 def _build_cache() -> CacheBackend:
-    return RedisCache(settings.redis_url)
+    return RedisCache(settings.redis_url, ttl_seconds=settings.cache_ttl_seconds)
 
 
 def get_cache() -> CacheBackend:

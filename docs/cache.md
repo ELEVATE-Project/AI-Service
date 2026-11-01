@@ -78,7 +78,7 @@ Request 1  → gets LLM response
            → atomic compare-and-delete of lock:key if still owned by token-A
 ```
 
-The owner releases its lock in `finally` after success, failure or stream cancellation. An atomic Lua comparison prevents an expired owner from deleting a newer owner's lock. Streaming acquires the lock only when the response body starts being consumed. If cleanup cannot reach Redis, the expiry remains the fallback.
+The owner releases its lock in `finally` after success, failure or stream cancellation. Cancellation while waiting for acquisition also attempts protected cleanup using the token that may already be stored. An atomic Lua comparison prevents an expired owner from deleting a newer owner's lock. Streaming acquires the lock only when the response body starts being consumed. If cleanup cannot reach Redis, the expiry remains the fallback.
 
 ---
 

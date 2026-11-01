@@ -365,3 +365,34 @@ async def test_cancellation_releases_the_lock(gateway):
     with pytest.raises(asyncio.CancelledError):
         await iterator.athrow(asyncio.CancelledError())
     assert gw.redis.values == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_cancellation_while_acquiring_releases_the_stored_lock(gateway, streaming):
+    gw = gateway()
+    stored = asyncio.Event()
+    pending_reply = asyncio.Event()
+    original_set = gw.redis.set.side_effect
+
+    async def store_before_reply(key, value, **kwargs):
+        result = original_set(key, value, **kwargs)
+        if key.startswith("lock:"):
+            stored.set()
+            await pending_reply.wait()
+        return result
+
+    gw.redis.set.side_effect = store_before_reply
+    request = asyncio.create_task(gw.send(streaming))
+    try:
+        await asyncio.wait_for(stored.wait(), timeout=1)
+        assert any(key.startswith("lock:") for key in gw.redis.values)
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+    finally:
+        request.cancel()
+        await asyncio.gather(request, return_exceptions=True)
+
+    assert gw.redis.values == {}
+    gw.redis.eval.assert_awaited_once()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Optional
@@ -52,6 +53,10 @@ class RedisCache(CacheBackend):
                 f"lock:{key}", token, nx=True, px=_LOCK_TTL_SECONDS * 1000,
             )
             return token if acquired else None
+        except asyncio.CancelledError:
+            # Redis may have stored the token before cancellation interrupted its reply.
+            await asyncio.shield(self.release(key, token))
+            raise
         except Exception:
             logger.warning("Response cache lock acquisition failed")
             return None

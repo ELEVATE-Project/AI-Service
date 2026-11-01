@@ -44,7 +44,8 @@ def gateway(monkeypatch):
         monkeypatch.setattr(chat_api.registry, "resolve", Mock(return_value=transport))
         entries = []
         db = SimpleNamespace(add=Mock(side_effect=entries.append), commit=AsyncMock(), rollback=AsyncMock())
-        cache = SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock())
+        cache = SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock(),
+                                acquire=AsyncMock(return_value="owner"), release=AsyncMock())
         key = TenantKeyPayload(key_format=KeyFormat.API_KEY, data={"api_key": "test-only"})
         app = FastAPI()
         app.include_router(chat_api.router)

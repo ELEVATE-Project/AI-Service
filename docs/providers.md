@@ -182,6 +182,8 @@ OpenRouter gives a tenant access to OpenRouter's full model catalog through a si
 **Cost:** OpenRouter reports the real cost of each call, so the gateway records it into `cost.provider_reported_usd` (from LiteLLM's `_hidden_params["response_cost"]` or OpenRouter's `usage.cost`) rather than relying on `pricing/models.yaml`. This is the authoritative figure; `computed_usd` stays 0 unless the model also has a YAML entry.
 
 > **Streaming caveat:** LiteLLM does not reliably preserve OpenRouter's `usage.cost` on streamed responses. When the reported cost is missing on a stream, `provider_reported_usd` is `null` and the gateway falls back to YAML pricing (0 if the model is unlisted).
+>
+> **Streaming usage capture:** LiteLLM rebuilds the final stream usage and drops OpenRouter's `server_tool_use_details` (web search count) and `cost`. The gateway reads these two fields from the raw provider chunks (`providers/litellm_stream_usage.py`) and uses them only when LiteLLM's own usage has none. If the LiteLLM version has no `completion_stream`, a warning is logged once and the old behaviour applies (`web_search_requests` and `provider_reported_usd` stay `null`).
 
 **OpenRouter-specific knobs** — passed via the optional `provider_options` field on the request and forwarded only when `provider == "openrouter"`:
 

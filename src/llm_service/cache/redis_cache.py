@@ -17,6 +17,15 @@ if redis.call('get', KEYS[1]) == ARGV[1] then
 end
 return 0
 """
+# Write the answer only while this owner still holds the lock; an expired owner must not
+# replace the entry a newer owner stored.
+_SET_IF_LOCK_OWNER = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    redis.call('set', KEYS[2], ARGV[2], 'EX', tonumber(ARGV[3]))
+    return 1
+end
+return 0
+"""
 logger = logging.getLogger(__name__)
 
 
@@ -36,11 +45,16 @@ class RedisCache(CacheBackend):
             logger.warning("Response cache read failed")
         return None
 
-    async def set(self, key: str, response: ChatResponse, ttl_seconds: int) -> None:
+    async def set(self, key: str, response: ChatResponse, ttl_seconds: int, token: str) -> None:
         if self._ttl_seconds <= 0 or ttl_seconds <= 0:
             return
         try:
-            await self._client.set(key, response.model_dump_json(), ex=ttl_seconds)
+            written = await self._client.eval(
+                _SET_IF_LOCK_OWNER, 2, f"lock:{key}", key,
+                token, response.model_dump_json(), ttl_seconds,
+            )
+            if not written:
+                logger.info("Response cache write refused: population lock no longer owned")
         except Exception:
             logger.warning("Response cache write failed")
 

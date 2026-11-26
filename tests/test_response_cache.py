@@ -30,6 +30,7 @@ class FakeRedis:
 
     def __init__(self):
         self.values = {}
+        self.ttls = {}
         self.get = AsyncMock(side_effect=lambda key: self.values.get(key))
         self.set = AsyncMock(side_effect=self._set)
         self.eval = AsyncMock(side_effect=self._eval)
@@ -40,10 +41,20 @@ class FakeRedis:
         assert ex is None or ex > 0
         assert px is None or px > 0
         self.values[key] = value
+        self.ttls[key] = ex
         return True
 
-    def _eval(self, script, numkeys, key, token):
+    def _eval(self, script, numkeys, *args):
+        if numkeys == 2:
+            # Compare-and-set: write KEYS[2] only while KEYS[1] still holds the token.
+            lock_key, key, token, payload, ttl = args
+            if self.values.get(lock_key) != token:
+                return 0
+            self.values[key] = payload
+            self.ttls[key] = int(ttl)
+            return 1
         assert numkeys == 1
+        key, token = args
         if self.values.get(key) == token:
             del self.values[key]
             return 1
@@ -89,7 +100,7 @@ async def test_disabled_cache_performs_no_redis_operations(cache_factory, ttl):
     cache, redis = cache_factory(ttl)
     assert await cache.get("key") is None
     assert await cache.acquire("key") is None
-    await cache.set("key", response(), ttl_seconds=ttl)
+    await cache.set("key", response(), ttl_seconds=ttl, token="not-acquired")
     await cache.release("key", "not-acquired")
     redis.assert_unused()
 
@@ -107,6 +118,47 @@ async def test_expired_owner_cannot_release_the_next_owners_lock(cache_factory):
     assert redis.values["lock:key"] == second
     await cache.release("key", second)
     assert "lock:key" not in redis.values
+
+
+@pytest.mark.asyncio
+async def test_owner_with_the_live_lock_stores_the_answer(cache_factory):
+    cache, redis = cache_factory()
+    token = await cache.acquire("key")
+    await cache.set("key", response(), ttl_seconds=60, token=token)
+    assert redis.ttls["key"] == 60
+    stored = await cache.get("key")
+    assert stored is not None and stored.choices[0].message.content == "Example title"
+
+
+@pytest.mark.asyncio
+async def test_expired_owner_cannot_overwrite_the_next_owners_answer(cache_factory):
+    cache, redis = cache_factory()
+    first = await cache.acquire("key")
+    del redis.values["lock:key"]  # A's lease expires while its provider call is running.
+    second = await cache.acquire("key")
+    assert second and first != second
+    newer = response()
+    newer.choices[0].message.content = "B's answer"
+    await cache.set("key", newer, ttl_seconds=60, token=second)
+    redis.ttls["key"] = 7  # B's entry has aged; a late write must not restart its TTL.
+    before = redis.values["key"]
+
+    late = response()
+    late.choices[0].message.content = "A's late answer"
+    await cache.set("key", late, ttl_seconds=60, token=first)
+
+    assert redis.values["key"] == before
+    assert redis.ttls["key"] == 7
+    assert (await cache.get("key")).choices[0].message.content == "B's answer"
+
+
+@pytest.mark.asyncio
+async def test_set_without_any_lock_is_refused(cache_factory):
+    cache, redis = cache_factory()
+    token = await cache.acquire("key")
+    del redis.values["lock:key"]
+    await cache.set("key", response(), ttl_seconds=60, token=token)
+    assert "key" not in redis.values
 
 
 @pytest.mark.parametrize("params", [
@@ -162,13 +214,13 @@ def gateway(monkeypatch, cache_factory):
         )
         monkeypatch.setattr(api.registry, "resolve", Mock(return_value=transport))
         if set_failure:
-            original_set = redis.set.side_effect
+            original_eval = redis.eval.side_effect
 
-            def failing_set(key, value, **kwargs):
-                if not key.startswith("lock:"):
+            def failing_eval(script, numkeys, *args):
+                if numkeys == 2:
                     raise ConnectionError("cache write failed")
-                return original_set(key, value, **kwargs)
-            redis.set.side_effect = failing_set
+                return original_eval(script, numkeys, *args)
+            redis.eval.side_effect = failing_eval
 
         dependencies = dict(
             tenant=SimpleNamespace(id="test-tenant"),
@@ -333,7 +385,7 @@ async def test_cache_write_failure_does_not_fail_the_answer_or_leave_a_lock(gate
     gw = gateway(set_failure=True)
     assert (await gw.send(streaming)).status_code == 200
     assert gw.redis.values == {}
-    gw.redis.eval.assert_awaited_once()
+    assert gw.redis.eval.await_count == 2  # the failed write, then the lock release
 
 
 @pytest.mark.asyncio

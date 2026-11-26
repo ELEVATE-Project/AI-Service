@@ -237,6 +237,60 @@ def _patch_stream_keeps_reasoning_details_only_chunks() -> None:
 
 _patch_stream_keeps_reasoning_details_only_chunks()
 
+
+def _patch_stream_keeps_cache_write_ttl_split() -> None:
+    """Keep Anthropic's 5m/1h cache-write split in LiteLLM's assembled stream usage.
+
+    Anthropic sends ``usage.cache_creation`` ({ephemeral_5m_input_tokens, ephemeral_1h_input_tokens})
+    only in ``message_start``. ``ChunkProcessor._calculate_usage_per_chunk`` (LiteLLM 1.83.0) then
+    overwrites ``prompt_tokens_details`` with the one from the LAST usage chunk (``message_delta``),
+    which has no split. Those chunks never reach our stream loop, only the assembled usage does, so
+    the split would be lost and mixed-TTL writes priced at one rate.
+
+    Wrap the method: when the assembled details have no split, copy in the last split seen on any
+    chunk, but only if 5m + 1h equals the aggregate write count (otherwise leave usage unchanged).
+    Counts are never changed. Idempotent; if LiteLLM changes the hook this does nothing and
+    ``tests/test_anthropic_stream_cache_split.py`` fails loudly.
+    """
+    try:
+        from litellm.litellm_core_utils.streaming_chunk_builder_utils import ChunkProcessor
+        original = ChunkProcessor._calculate_usage_per_chunk
+        if getattr(original, "_ai_service_patched", False):
+            return
+    except (ImportError, AttributeError):
+        return
+
+    def _patched(self: Any, chunks: Any) -> Any:
+        result = original(self, chunks)
+        try:
+            details = result.get("prompt_tokens_details")
+            if details is None or getattr(details, "cache_creation_token_details", None) is not None:
+                return result
+            split = None
+            for chunk in chunks:
+                usage = chunk["usage"] if "usage" in chunk else (
+                    (getattr(chunk, "_hidden_params", None) or {}).get("usage"))
+                found = getattr(getattr(usage, "prompt_tokens_details", None),
+                                "cache_creation_token_details", None)
+                if found is not None:
+                    split = found
+            if split is not None:
+                total = (getattr(split, "ephemeral_5m_input_tokens", 0) or 0) + (
+                    getattr(split, "ephemeral_1h_input_tokens", 0) or 0)
+                if total and total == result.get("cache_creation_input_tokens"):
+                    details = details.model_copy()
+                    details.cache_creation_token_details = split
+                    result["prompt_tokens_details"] = details
+        except Exception:
+            pass
+        return result
+
+    _patched._ai_service_patched = True  # type: ignore[attr-defined]
+    ChunkProcessor._calculate_usage_per_chunk = _patched
+
+
+_patch_stream_keeps_cache_write_ttl_split()
+
 # LiteLLM 1.83.0's bundled cost map predates Haiku 5.5. Register capability
 # locally so drop_params=True retains thinking even without a price-map download.
 # Billing continues to use pricing/models.yaml, not LiteLLM's cost map.

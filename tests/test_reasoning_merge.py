@@ -56,3 +56,20 @@ def test_same_id_and_index_merge() -> None:
         {"type": "reasoning.encrypted", "id": "r1", "index": 0, "data": "bb"},
     )
     assert blocks == [{"type": "reasoning.encrypted", "id": "r1", "index": 0, "data": "aabb"}]
+
+
+def test_none_in_a_later_fragment_never_erases_stored_metadata() -> None:
+    # OpenRouter sends explicit nulls. A null must not wipe id, format, type or index.
+    blocks = _merge(
+        {"type": "reasoning.encrypted", "index": 1, "id": "r1", "format": "f", "data": "a"},
+        {"index": 1, "id": None, "type": None, "format": None, "data": "b"},
+    )
+    assert blocks == [{"type": "reasoning.encrypted", "index": 1, "id": "r1", "format": "f", "data": "ab"}]
+
+
+def test_a_later_value_fills_a_key_that_started_as_none() -> None:
+    blocks = _merge(
+        {"type": "reasoning.text", "index": 0, "format": None, "text": "a"},
+        {"index": 0, "format": "anthropic-claude-v1", "text": "b"},
+    )
+    assert blocks == [{"type": "reasoning.text", "index": 0, "format": "anthropic-claude-v1", "text": "ab"}]

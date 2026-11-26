@@ -355,10 +355,10 @@ def _merge_reasoning_details(
             blocks.append(dict(delta))
             continue
         for key, value in delta.items():
+            if value is None and existing.get(key) is not None:
+                continue  # OpenRouter sends explicit nulls; never erase a stored value
             if key in _REASONING_TEXT_KEYS and isinstance(value, str):
                 existing[key] = (existing.get(key) or "") + value
-            elif key in _REASONING_TEXT_KEYS and value is None and existing.get(key):
-                continue
             else:
                 existing[key] = value
 

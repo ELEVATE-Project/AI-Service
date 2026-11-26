@@ -32,6 +32,9 @@ dependencies = [
     "keyring>=24.0",
     "cryptography>=42.0",
     # LLM SDK — in-process gravity-well default transport
+    # WARNING: src/llm_service/providers/litellm.py patches LiteLLM internals and was
+    # tested on 1.83.0 (uv.lock). Before upgrading, read the "READ BEFORE UPGRADING
+    # LITELLM" note in that file and run the full test suite.
     "litellm>=1.0",
     # Async job queue — batch consolidation worker
     "arq>=0.26",

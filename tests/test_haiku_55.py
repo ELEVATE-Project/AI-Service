@@ -70,7 +70,13 @@ class BytesStream(httpx.AsyncByteStream):
 
 @pytest.fixture
 def wire(monkeypatch):
-    """Run LiteLLM's parameter filtering and adapters directly, without its I/O wrapper."""
+    """Run LiteLLM's parameter filtering and adapters directly, without its I/O wrapper.
+
+    NOTE: this skips CustomStreamWrapper, so it also skips LiteLLM's empty-chunk filter
+    and the stream usage assembly. Anything that depends on those (see the two
+    `real_*_stream` fixtures and tests/test_anthropic_stream_cache_split.py) must use
+    the real wrapper, or the test can pass while the real path loses data.
+    """
     from litellm.llms.anthropic.chat.handler import ModelResponseIterator
     from litellm.llms.anthropic.chat.transformation import AnthropicConfig
     from litellm.llms.openrouter.chat.transformation import OpenrouterConfig, OpenRouterChatCompletionStreamingHandler

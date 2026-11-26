@@ -144,6 +144,22 @@ def _build_fallbacks(
     ]
 
 
+# =============================================================================
+# READ BEFORE UPGRADING LITELLM
+# The three _patch_* functions below change LiteLLM internals. They were written
+# and tested against LiteLLM 1.83.0 (the version in uv.lock):
+#   1. _patch_anthropic_hidden_original_response  (AnthropicConfig.transform_response)
+#   2. _patch_stream_keeps_reasoning_details_only_chunks
+#        (CustomStreamWrapper.is_chunk_non_empty)
+#   3. _patch_stream_keeps_cache_write_ttl_split
+#        (ChunkProcessor._calculate_usage_per_chunk)
+# If a hook is renamed or removed, a patch silently does nothing and the gateway
+# loses reasoning blocks or cache-duration pricing again. After any LiteLLM bump:
+#   - run the full test suite; tests/test_haiku_55.py and
+#     tests/test_anthropic_stream_cache_split.py fail on purpose when a patch is
+#     missing;
+#   - check whether the new LiteLLM already fixes the problem, then delete the patch.
+# =============================================================================
 def _patch_anthropic_hidden_original_response() -> None:
     """Work around a LiteLLM bug (confirmed against litellm==1.83.0) that discards the
     raw, ordered Anthropic content-block array before ``litellm.acompletion()`` ever

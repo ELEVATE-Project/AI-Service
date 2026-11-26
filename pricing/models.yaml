@@ -18,11 +18,11 @@ models:
     input_rate_per_1k_tokens: 0.003
     output_rate_per_1k_tokens: 0.015
     cache_write_rate_per_1k_tokens: 0.00375
-    # Anthropic bills 1h cache writes at 2x input ($6/MTok on Sonnet 4.5).
-    # Not re-checked against the pricing page on the date below.
+    # Anthropic pricing page checked 2026-11-26: input $3, output $15, 5m writes
+    # $3.75, 1h writes $6, cache reads $0.30 per MTok. No long-context tier.
     cache_write_1h_rate_per_1k_tokens: 0.006
     cache_read_rate_per_1k_tokens: 0.0003
-    last_updated: "2026-05-27"
+    last_updated: "2026-11-26"
     source_url: "https://platform.claude.com/docs/en/about-claude/pricing"
 
   anthropic/claude-haiku-4-5:

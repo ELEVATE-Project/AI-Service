@@ -255,9 +255,24 @@ def test_no_cache_cost_matches_previous_formula(provider, model) -> None:
     assert usage.input_tokens_cache_write is None
 
 
-def test_one_hour_rate_falls_back_to_five_minute_rate() -> None:
+def test_one_hour_rate_falls_back_to_five_minute_rate(monkeypatch) -> None:
+    # Synthetic entry with no cache_write_1h rate: tests the generic missing-rate fallback.
+    monkeypatch.setitem(pricing_table._models, "anthropic/synthetic-no-1h-rate", {
+        "input_rate_per_1k_tokens": 0.003, "output_rate_per_1k_tokens": 0.015,
+        "cache_write_rate_per_1k_tokens": 0.00375, "cache_read_rate_per_1k_tokens": 0.0003,
+    })
     usage = UsageBlock(input_tokens=33000, input_tokens_cache_write=32000)
-    assert _compute_cost("anthropic", "claude-sonnet-4-5", usage, cache_ttl="1h").computed_usd == pytest.approx(0.123)
+    cost = _compute_cost("anthropic", "synthetic-no-1h-rate", usage, cache_ttl="1h")
+    assert cost.computed_usd == pytest.approx(0.123)
+
+
+def test_sonnet_4_5_one_hour_cache_write_uses_one_hour_rate() -> None:
+    # $6/MTok for 1h writes: 1000 uncached * 0.003/1k + 32000 * 0.006/1k = 0.195
+    explicit = UsageBlock(input_tokens=33000, input_tokens_cache_write=32000,
+                          input_tokens_cache_write_1h=32000)
+    assert _compute_cost("anthropic", "claude-sonnet-4-5", explicit).computed_usd == pytest.approx(0.195)
+    ttl_only = UsageBlock(input_tokens=33000, input_tokens_cache_write=32000)
+    assert _compute_cost("anthropic", "claude-sonnet-4-5", ttl_only, cache_ttl="1h").computed_usd == pytest.approx(0.195)
 
 
 def test_cache_subtraction_is_floored_and_reads_and_writes_are_priced_once() -> None:

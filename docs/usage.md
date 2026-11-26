@@ -398,6 +398,19 @@ Keep polling until `status` is `"complete"` or `"failed"`. There is no webhook �
 
 ---
 
+## GET /v1/models
+
+Lists models from the LiteLLM catalog and, when the tenant has an OpenRouter key, from OpenRouter. Filters: `provider`, `mode` (for example `chat`, `embedding`), `q` (substring of id or name). The list covers every mode and is not limited to what chat accepts.
+
+Each entry has a `chat_admitted` boolean:
+
+- `true` for every OpenRouter model, and for any other model that has an entry in `pricing/models.yaml`.
+- `false` for a non-OpenRouter model with no pricing entry. `POST /v1/chat` and `POST /v1/chat/stream` reject it with `422 unpriced_model`. Add the model to `pricing/models.yaml` before using it for chat.
+
+`chat_admitted` describes chat admission only. Batch and non-chat uses are not limited by it.
+
+---
+
 ## GET /v1/cache/options
 
 Supported values for `params.cache_options` — poll this instead of hardcoding `ttl`/`targets` values, so a calling service always gets the current supported set.
@@ -434,6 +447,7 @@ See [Provider Layer → Prompt caching](providers.md#prompt-caching) for the ful
 | 403 | `Service is not authorised to act on behalf of tenant '...'` | Token valid but this service cannot access the requested tenant |
 | 400 | `Missing X-Tenant-Id header.` | `X-Tenant-Id` header absent |
 | 422 | `missing_tenant_key` | No provider key stored for this tenant |
+| 422 | `unpriced_model` | Non-OpenRouter chat model with no entry in `pricing/models.yaml`. See `chat_admitted` in [GET /v1/models](#get-v1models) |
 | 422 | `provider_not_batch_eligible` | Provider does not support the batch API |
 | 429 | `policy_exceeded` | Model denied, monthly budget exceeded, or `max_tokens` over the tenant cap |
 | 502 | `upstream_error` | Provider returned an unrecognised error |

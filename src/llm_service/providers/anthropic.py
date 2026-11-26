@@ -18,6 +18,27 @@ from src.shared.schemas.envelope import CostBlock, GuardrailsBlock, LatencyBlock
 from src.shared.secrets.backend import TenantKeyPayload
 
 
+def _with_native_thinking(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Move an assistant message's ``thinking_blocks`` into its ``content`` list.
+
+    Anthropic expects signed thinking blocks as content blocks, unchanged and in
+    order, ahead of the text. Messages without ``thinking_blocks`` are untouched.
+    """
+    converted = []
+    for message in messages:
+        blocks = message.get("thinking_blocks")
+        if not blocks:
+            converted.append(message)
+            continue
+        content: list[dict[str, Any]] = list(blocks)
+        text = message.get("content")
+        if isinstance(text, str) and text:
+            content.append({"type": "text", "text": text})
+        converted.append({**{k: v for k, v in message.items() if k != "thinking_blocks"},
+                          "content": content})
+    return converted
+
+
 class AnthropicTransport(BaseLLMProvider):
     """Direct Anthropic SDK transport.
     """
@@ -41,7 +62,7 @@ class AnthropicTransport(BaseLLMProvider):
             params = req.get("params") or {}
             message_params: dict[str, Any] = {
                 "model": req["model"],
-                "messages": req["messages"],
+                "messages": _with_native_thinking(req["messages"]),
                 "max_tokens": params.get("max_tokens") or 1024,
             }
             if req.get("tools"):

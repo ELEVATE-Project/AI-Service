@@ -427,3 +427,106 @@ async def test_anthropic_batch_reply_keeps_raw_thinking(monkeypatch):
     returned = job.result["choices"][0]["message"]
     assert returned["content"] == "Answer"
     assert returned["thinking_blocks"] == ANTHROPIC_BLOCKS
+
+
+# --- OpenRouter streamed reasoning_details through LiteLLM's real stream wrapper -------------
+# The `wire` fixture above yields the parser's chunks directly, so it never reaches
+# CustomStreamWrapper's empty-chunk filter. These tests do.
+
+def _openrouter_sse():
+    first, encrypted = blocks("openrouter")
+    summary = {"type": "reasoning.summary", "summary": "Short summary", "id": "r0",
+               "format": "anthropic-claude-v1", "index": 0}
+    deltas = [
+        {"reasoning": "Private ", "reasoning_details": [summary]},
+        {"reasoning_details": [{**encrypted, "id": "r1", "data": "opaque-"}]},
+        {"reasoning_details": [{**encrypted, "id": "r1", "data": "redacted"}]},
+        {"content": "Answer"},
+        {},
+    ]
+    events = [{"id": "chat_test", "object": "chat.completion.chunk", "created": 1,
+               "model": "anthropic/claude-haiku-5.5", "choices": [{"index": 0, "delta": delta,
+               "finish_reason": "stop" if i == len(deltas) - 1 else None}]}
+              for i, delta in enumerate(deltas)]
+    return [f"data: {json.dumps(event)}" for event in events] + ["data: [DONE]"]
+
+
+EXPECTED_STREAMED_DETAILS = [
+    {"type": "reasoning.summary", "summary": "Short summary", "id": "r0",
+     "format": "anthropic-claude-v1", "index": 0},
+    {"type": "reasoning.encrypted", "data": "opaque-redacted", "id": "r1",
+     "format": "anthropic-claude-v1", "index": 1},
+]
+
+
+def _real_openrouter_wrapper(lines):
+    from datetime import datetime, timezone
+    from litellm.litellm_core_utils.litellm_logging import Logging
+    from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
+    from litellm.llms.openrouter.chat.transformation import OpenRouterChatCompletionStreamingHandler
+
+    async def sse():
+        for line in lines:
+            yield line
+
+    model = "anthropic/claude-haiku-5.5"
+    return CustomStreamWrapper(
+        completion_stream=OpenRouterChatCompletionStreamingHandler(
+            streaming_response=sse(), sync_stream=False),
+        model=model, custom_llm_provider="openrouter",
+        logging_obj=Logging(model=model, messages=[], stream=True, call_type="acompletion",
+                            start_time=datetime.now(timezone.utc), litellm_call_id="x", function_id="x"),
+    )
+
+
+@pytest.fixture
+def real_openrouter_stream(wire, monkeypatch):
+    """Like `wire`, but streamed OpenRouter replies go through CustomStreamWrapper."""
+    plain_completion = litellm.acompletion
+
+    async def completion(**kwargs):
+        if kwargs.get("stream") and kwargs["model"].startswith("openrouter/"):
+            wire.kwargs.append(copy.deepcopy(kwargs))
+            return _real_openrouter_wrapper(_openrouter_sse())
+        return await plain_completion(**kwargs)
+
+    monkeypatch.setattr(litellm, "acompletion", completion)
+    return wire
+
+
+@pytest.mark.asyncio
+async def test_openrouter_details_only_chunks_survive_litellm_stream_wrapper():
+    seen = []
+    async for chunk in _real_openrouter_wrapper(_openrouter_sse()):
+        seen.extend(getattr(chunk.choices[0].delta, "reasoning_details", None) or [])
+    assert [d.get("data") or d.get("summary") for d in seen] == ["Short summary", "opaque-", "redacted"]
+
+
+@pytest.mark.asyncio
+async def test_openrouter_stream_finish_has_complete_encrypted_block(real_openrouter_stream):
+    req = request("openrouter", "anthropic/claude-haiku-5.5",
+                  params=ChatParams(thinking=THINKING, output_config=OUTPUT))
+    events = [event async for event in LiteLLMTransport().stream(req, KEY)]
+    assert "".join(e.data.delta for e in events if e.type == "token") == "Answer"
+    assert events[-1].type == "finish", events
+    assert events[-1].data.thinking_blocks == EXPECTED_STREAMED_DETAILS
+
+
+@pytest.mark.asyncio
+async def test_openrouter_streamed_blocks_replay_in_tool_loop(real_openrouter_stream):
+    req = request("openrouter", "anthropic/claude-haiku-5.5",
+                  params=ChatParams(thinking=THINKING, output_config=OUTPUT), tools=TOOLS)
+    events = [event async for event in LiteLLMTransport().stream(req, KEY)]
+    thinking = events[-1].data.thinking_blocks
+    req.messages.extend([
+        MessageParam(role="assistant", content=None, thinking_blocks=thinking, tool_calls=[TOOL_CALL]),
+        MessageParam(role="tool", tool_call_id="toolu_test", content="result"),
+    ])
+    await LiteLLMTransport().chat(req, KEY)
+    assert real_openrouter_stream.bodies[-1]["messages"][1]["reasoning_details"] == EXPECTED_STREAMED_DETAILS
+
+
+def test_openrouter_details_filter_patch_is_in_place():
+    """Fails loudly if a LiteLLM upgrade removes the hook or the patch stops applying."""
+    from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
+    assert getattr(CustomStreamWrapper.is_chunk_non_empty, "_ai_service_patched", False)

@@ -200,6 +200,43 @@ def _patch_anthropic_hidden_original_response() -> None:
 
 _patch_anthropic_hidden_original_response()
 
+
+def _patch_stream_keeps_reasoning_details_only_chunks() -> None:
+    """Stop LiteLLM's stream wrapper dropping OpenRouter chunks that carry only ``reasoning_details``.
+
+    OpenRouter streams Anthropic's encrypted/redacted reasoning as deltas whose only field is
+    ``reasoning_details`` (no ``reasoning`` text, no content, no tool call). The OpenRouter chunk
+    parser keeps that field on the delta, but ``CustomStreamWrapper.is_chunk_non_empty`` does not
+    look at it, so LiteLLM 1.83.0 treats the chunk as empty and never yields it. The finish event
+    would then miss blocks, and Anthropic rejects a tool-loop replay whose blocks are incomplete.
+
+    Wrap the check so a delta with non-empty ``reasoning_details`` counts as non-empty. Every
+    other chunk still goes through the original check. Idempotent; if LiteLLM changes the hook
+    this does nothing, and ``tests/test_haiku_55.py`` fails loudly instead.
+    """
+    try:
+        from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
+        original = CustomStreamWrapper.is_chunk_non_empty
+        if getattr(original, "_ai_service_patched", False):
+            return
+    except (ImportError, AttributeError):
+        return
+
+    def _patched(self: Any, completion_obj: Any, model_response: Any, response_obj: Any) -> bool:
+        if original(self, completion_obj, model_response, response_obj):
+            return True
+        try:
+            delta = model_response.choices[0].delta
+            return bool(getattr(delta, "reasoning_details", None))
+        except Exception:
+            return False
+
+    _patched._ai_service_patched = True  # type: ignore[attr-defined]
+    CustomStreamWrapper.is_chunk_non_empty = _patched
+
+
+_patch_stream_keeps_reasoning_details_only_chunks()
+
 # LiteLLM 1.83.0's bundled cost map predates Haiku 5.5. Register capability
 # locally so drop_params=True retains thinking even without a price-map download.
 # Billing continues to use pricing/models.yaml, not LiteLLM's cost map.

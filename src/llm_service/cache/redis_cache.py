@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import uuid
 from typing import Optional
 
 import redis.asyncio as aioredis
@@ -9,38 +11,74 @@ from src.llm_service.cache.base import CacheBackend
 from src.llm_service.schemas.chat import ChatResponse
 
 _LOCK_TTL_SECONDS = 10
-_POLL_INTERVAL_SECONDS = 0.2
+_RELEASE_LOCK = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    return redis.call('del', KEYS[1])
+end
+return 0
+"""
+# Write the answer only while this owner still holds the lock; an expired owner must not
+# replace the entry a newer owner stored.
+_SET_IF_LOCK_OWNER = """
+if redis.call('get', KEYS[1]) == ARGV[1] then
+    redis.call('set', KEYS[2], ARGV[2], 'EX', tonumber(ARGV[3]))
+    return 1
+end
+return 0
+"""
+logger = logging.getLogger(__name__)
 
 
 class RedisCache(CacheBackend):
-    def __init__(self, redis_url: str) -> None:
+    def __init__(self, redis_url: str, *, ttl_seconds: int) -> None:
+        self._ttl_seconds = ttl_seconds
         self._client: aioredis.Redis = aioredis.from_url(redis_url, decode_responses=True)
 
     async def get(self, key: str) -> Optional[ChatResponse]:
+        if self._ttl_seconds <= 0:
+            return None
         try:
             raw_json = await self._client.get(key)
             if raw_json:
                 return ChatResponse.model_validate_json(raw_json)
-
-            lock_key = f"lock:{key}"
-            acquired = await self._client.set(lock_key, "1", nx=True, ex=_LOCK_TTL_SECONDS)
-            if acquired:
-                # This request won the lock and will populate the cache via set()
-                return None
-
-            # Another request holds the lock — wait for the data key to appear
-            deadline = asyncio.get_running_loop().time() + _LOCK_TTL_SECONDS
-            while asyncio.get_running_loop().time() < deadline:
-                await asyncio.sleep(_POLL_INTERVAL_SECONDS)
-                raw_json = await self._client.get(key)
-                if raw_json:
-                    return ChatResponse.model_validate_json(raw_json)
-            return None
         except Exception:
-            return None
+            logger.warning("Response cache read failed")
+        return None
 
-    async def set(self, key: str, response: ChatResponse, ttl_seconds: int) -> None:
+    async def set(self, key: str, response: ChatResponse, ttl_seconds: int, token: str) -> None:
+        if self._ttl_seconds <= 0 or ttl_seconds <= 0:
+            return
         try:
-            await self._client.set(key, response.model_dump_json(), ex=ttl_seconds)
+            written = await self._client.eval(
+                _SET_IF_LOCK_OWNER, 2, f"lock:{key}", key,
+                token, response.model_dump_json(), ttl_seconds,
+            )
+            if not written:
+                logger.info("Response cache write refused: population lock no longer owned")
         except Exception:
-            pass
+            logger.warning("Response cache write failed")
+
+    async def acquire(self, key: str) -> Optional[str]:
+        if self._ttl_seconds <= 0:
+            return None
+        token = uuid.uuid4().hex
+        try:
+            acquired = await self._client.set(
+                f"lock:{key}", token, nx=True, px=_LOCK_TTL_SECONDS * 1000,
+            )
+            return token if acquired else None
+        except asyncio.CancelledError:
+            # Redis may have stored the token before cancellation interrupted its reply.
+            await asyncio.shield(self.release(key, token))
+            raise
+        except Exception:
+            logger.warning("Response cache lock acquisition failed")
+            return None
+
+    async def release(self, key: str, token: str) -> None:
+        if self._ttl_seconds <= 0:
+            return
+        try:
+            await self._client.eval(_RELEASE_LOCK, 1, f"lock:{key}", token)
+        except Exception:
+            logger.warning("Response cache lock release failed")

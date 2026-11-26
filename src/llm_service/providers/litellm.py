@@ -18,6 +18,7 @@ import litellm
 from src.llm_service.providers.base import (
     BaseLLMProvider, StreamEvent, TransportFinishData, UpstreamTransportError,
 )
+from src.llm_service.providers.litellm_stream_usage import install_stream_usage_tap
 from src.llm_service.schemas.chat import (
     CACHE_CAPABLE_PROVIDERS, CACHE_TARGET_DEFAULT, CacheBlock, ChatResponse, Choice,
     ChoiceMessage, ErrorData, NormalisedLLMRequest, TokenData, ToolUseData, UsageBlock,
@@ -658,7 +659,19 @@ class LiteLLMTransport(BaseLLMProvider):
         def _split_count(name: str) -> Optional[int]:
             return split.get(name) if isinstance(split, dict) else getattr(split, name, None)
 
+        def _search_count(box: Any) -> Optional[int]:
+            if isinstance(box, dict):
+                return box.get("web_search_requests")
+            return getattr(box, "web_search_requests", None)
+
+        # Anthropic names the count server_tool_use; OpenRouter names it
+        # server_tool_use_details (LiteLLM 1.83 keeps it as an extra attribute).
+        web_search_requests = _search_count(getattr(raw_usage, "server_tool_use", None))
+        if web_search_requests is None:
+            web_search_requests = _search_count(getattr(raw_usage, "server_tool_use_details", None))
+
         return UsageBlock(
+            web_search_requests=web_search_requests,
             input_tokens=getattr(raw_usage, "prompt_tokens", 0) or 0,
             output_tokens=getattr(raw_usage, "completion_tokens", 0) or 0,
             input_tokens_cache_read=cache_read or None,
@@ -855,6 +868,7 @@ class LiteLLMTransport(BaseLLMProvider):
                     return
                 await asyncio.sleep(_retry_delay(error, attempt, backoff_base_s))
 
+        usage_tap = install_stream_usage_tap(response_stream)
         final_usage = UsageBlock()
         final_finish_reason = "stop"
         final_citations: Optional[list[Any]] = None
@@ -923,6 +937,13 @@ class LiteLLMTransport(BaseLLMProvider):
                 ),
             )
             return
+
+        # LiteLLM's rebuilt usage drops OpenRouter's search count and cost; use
+        # the raw-chunk capture only where LiteLLM gave nothing.
+        if final_usage.web_search_requests is None:
+            final_usage.web_search_requests = usage_tap.web_search_requests
+        if reported_cost is None:
+            reported_cost = usage_tap.cost
 
         # Citations are only on the assembled response, not individual chunks.
         # stream_chunk_builder rebuilds the full ModelResponse from collected chunks.

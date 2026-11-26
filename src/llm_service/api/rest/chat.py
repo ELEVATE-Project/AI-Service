@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 import uuid
@@ -15,6 +16,7 @@ from src.llm_service.api.deps import (
     get_cache, get_guardrails, get_policy_checker, get_secret_backend, get_tenant,
 )
 from src.llm_service.cache.base import CacheBackend
+from src.llm_service.cache.eligibility import can_cache_request, can_cache_response
 from src.llm_service.cache.keys import make_cache_key
 from src.llm_service.normaliser import normalise
 from src.llm_service.providers import registry
@@ -95,13 +97,41 @@ def _compute_cost(
     return cost
 
 
+# Request metadata keys copied into the ledger row, so a row joins to a session, bot and call kind.
+# `metadata` stays optional: a caller that sends none works as before and its row keeps NULLs.
+# Only this ledger copy is filtered; the request passed on is not changed.
+LEDGER_METADATA_KEYS = ("session_id", "bot_id", "bot_history_id", "turn_id", "call_kind", "language", "batch")
+LEDGER_METADATA_MAX_CHARS = 64
+LEDGER_METADATA_MAX_INT = 2 ** 53
+
+
+def _ledger_metadata(metadata: Optional[dict]) -> Optional[dict]:
+    """Allow-listed ids from the request metadata: short strings, booleans and safe integers.
+
+    Anything else is dropped (floats, NaN, huge ints, NUL bytes, nested values), so the
+    value can't make the JSONB/text write fail and lose the billing row.
+    """
+    if not metadata:
+        return None
+    kept = {}
+    for key in LEDGER_METADATA_KEYS:
+        value = metadata.get(key)
+        if isinstance(value, bool):
+            kept[key] = value
+        elif isinstance(value, int) and abs(value) < LEDGER_METADATA_MAX_INT:
+            kept[key] = value
+        elif isinstance(value, str) and len(value) <= LEDGER_METADATA_MAX_CHARS and "\x00" not in value:
+            kept[key] = value
+    return kept or None
+
+
 async def _write_ledger_entry(
     db: AsyncSession, *, request_id: str, tenant_id: str, provider: str, model: str,
     feature: Feature, status: LedgerStatus, latency_ms: int,
     usage: Optional["UsageBlock"] = None, cost: Optional[CostBlock] = None,
     time_to_first_token_ms: Optional[int] = None, error_code: Optional[str] = None,
     our_cache_hit: bool = False, guardrail_flags: Optional[dict] = None,
-    provider_reported_usage: Optional[dict] = None,
+    provider_reported_usage: Optional[dict] = None, call_metadata: Optional[dict] = None,
 ) -> None:
     """Write one audit row to ledger_entries.
 
@@ -115,7 +145,8 @@ async def _write_ledger_entry(
     so on a unique-constraint violation we retry once with a disambiguated id rather
     than treating it as an already-recorded duplicate.
     """
-    def _build_entry(entry_request_id: str) -> LedgerEntry:
+    def _build_entry(entry_request_id: str, with_metadata: bool = True) -> LedgerEntry:
+        stored_metadata = call_metadata if with_metadata else None
         return LedgerEntry(
             request_id=entry_request_id,
             tenant_id=tenant_id,
@@ -139,6 +170,9 @@ async def _write_ledger_entry(
             our_cache_hit=our_cache_hit,
             batched=False,
             guardrail_flags=guardrail_flags,
+            call_metadata=stored_metadata,
+            session_id=(str(stored_metadata["session_id"])
+                        if stored_metadata and "session_id" in stored_metadata else None),
         )
 
     db.add(_build_entry(request_id))
@@ -151,6 +185,14 @@ async def _write_ledger_entry(
     except Exception as exc:
         print(f"[ledger] write failed for request_id={request_id}: {exc!r}")
         await db.rollback()
+        if call_metadata:
+            # Billing comes first: keep the row, without the optional metadata.
+            db.add(_build_entry(request_id, with_metadata=False))
+            try:
+                await db.commit()
+            except Exception as retry_exc:
+                print(f"[ledger] write without metadata failed for request_id={request_id}: {retry_exc!r}")
+                await db.rollback()
         return
 
     disambiguated_id = f"{request_id}:dup:{uuid.uuid4().hex[:8]}"
@@ -173,6 +215,7 @@ async def chat(
 ) -> Union[ChatResponse, JSONResponse]:
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
+    call_metadata = _ledger_metadata(body.metadata)
     print(f"[chat] request: {body.model_dump_json(indent=2)}")
     normalised = await normalise(body, db, tenant.id)
     # Batch admission is a separate path; this check covers synchronous chat.
@@ -197,11 +240,15 @@ async def chat(
         normalised = normalised.model_copy(update={
             "messages": [MessageParam(**m) for m in input_result.modified_messages]
         })
-    cache_key = make_cache_key(tenant.id, normalised)
-    cached = await cache.get(cache_key)
-    if cached:
+    cache_key = (
+        make_cache_key(tenant.id, normalised)
+        if can_cache_request(normalised, settings.cache_ttl_seconds) else None
+    )
+    cached = await cache.get(cache_key) if cache_key is not None else None
+    if cached and can_cache_response(cached):
+        logger.info("Response cache hit", extra={"request_id": request_id})
         await _write_ledger_entry(
-            db, request_id=request_id, tenant_id=tenant.id,
+            db, request_id=request_id, tenant_id=tenant.id, call_metadata=call_metadata,
             provider=normalised.provider, model=normalised.model,
             feature=Feature.CHAT, status=LedgerStatus.SUCCESS,
             latency_ms=int((time.monotonic() - start) * 1000),
@@ -209,7 +256,8 @@ async def chat(
             our_cache_hit=True,
             provider_reported_usage=(cached.provider_raw or {}).get("usage") or cached.usage.model_dump(),
         )
-        return cached.model_copy(update={"cache": CacheBlock(our_cache_hit=True)})
+        # The id is this request's id (the one on its ledger row), as on a live call and a stream cache hit.
+        return cached.model_copy(update={"id": request_id, "cache": CacheBlock(our_cache_hit=True)})
 
     if body.metadata and body.metadata.get("batch") is True:
         if normalised.provider not in BATCH_ELIGIBLE_PROVIDERS:
@@ -231,51 +279,57 @@ async def chat(
             ).model_dump(),
         )
 
-    transport = registry.resolve(normalised.provider, normalised.model, "chat")
-    upstream_start = time.monotonic()
+    cache_token = await cache.acquire(cache_key) if cache_key is not None else None
     try:
-        response = await transport.chat(normalised, tenant_key)
-    except UpstreamTransportError as upstream_error:
-        await _write_ledger_entry(
-            db, request_id=request_id, tenant_id=tenant.id,
-            provider=normalised.provider, model=normalised.model,
-            feature=Feature.CHAT, status=LedgerStatus.ERROR,
-            latency_ms=int((time.monotonic() - start) * 1000),
-            error_code=upstream_error.code,
-        )
-        extra_headers = {"Retry-After": upstream_error.retry_after} if upstream_error.retry_after else None
-        raise HTTPException(
-            status_code=upstream_error.http_status, detail=upstream_error.code,
-            headers=extra_headers,
-        )
-    upstream_ms = int((time.monotonic() - upstream_start) * 1000)
+        transport = registry.resolve(normalised.provider, normalised.model, "chat")
+        upstream_start = time.monotonic()
+        try:
+            response = await transport.chat(normalised, tenant_key)
+        except UpstreamTransportError as upstream_error:
+            await _write_ledger_entry(
+                db, request_id=request_id, tenant_id=tenant.id, call_metadata=call_metadata,
+                provider=normalised.provider, model=normalised.model,
+                feature=Feature.CHAT, status=LedgerStatus.ERROR,
+                latency_ms=int((time.monotonic() - start) * 1000),
+                error_code=upstream_error.code,
+            )
+            extra_headers = {"Retry-After": upstream_error.retry_after} if upstream_error.retry_after else None
+            raise HTTPException(
+                status_code=upstream_error.http_status, detail=upstream_error.code,
+                headers=extra_headers,
+            )
+        upstream_ms = int((time.monotonic() - upstream_start) * 1000)
 
-    elapsed_ms = int((time.monotonic() - start) * 1000)
-    response.id = request_id
-    response.tenant_id = tenant.id
-    response.latency_ms = LatencyBlock(total=elapsed_ms, upstream=upstream_ms)
-    response.guardrails = GuardrailsBlock(
-        input_flags=input_result.flags,
-        output_flags=[],
-        redactions_applied=input_result.redactions,
-    )
-    response.cost = _compute_cost(
-        normalised.provider, normalised.model, response.usage,
-        provider_reported_usd=response.cost.provider_reported_usd,
-        cache_ttl=(normalised.params.cache_options.ttl
-                   if normalised.params and normalised.params.cache_options else None),
-    )
-    await _write_ledger_entry(
-        db, request_id=request_id, tenant_id=tenant.id,
-        provider=normalised.provider, model=normalised.model,
-        feature=Feature.CHAT, status=LedgerStatus.SUCCESS,
-        latency_ms=elapsed_ms, usage=response.usage, cost=response.cost,
-        guardrail_flags=response.guardrails.model_dump() if response.guardrails else None,
-        provider_reported_usage=(response.provider_raw or {}).get("usage") or response.usage.model_dump(),
-    )
-    await cache.set(cache_key, response, ttl_seconds=settings.cache_ttl_seconds)
-    print(f"[chat] response: {response.model_dump_json(indent=2)}")
-    return response
+        elapsed_ms = int((time.monotonic() - start) * 1000)
+        response.id = request_id
+        response.tenant_id = tenant.id
+        response.latency_ms = LatencyBlock(total=elapsed_ms, upstream=upstream_ms)
+        response.guardrails = GuardrailsBlock(
+            input_flags=input_result.flags,
+            output_flags=[],
+            redactions_applied=input_result.redactions,
+        )
+        response.cost = _compute_cost(
+            normalised.provider, normalised.model, response.usage,
+            provider_reported_usd=response.cost.provider_reported_usd,
+            cache_ttl=(normalised.params.cache_options.ttl
+                       if normalised.params and normalised.params.cache_options else None),
+        )
+        await _write_ledger_entry(
+            db, request_id=request_id, tenant_id=tenant.id, call_metadata=call_metadata,
+            provider=normalised.provider, model=normalised.model,
+            feature=Feature.CHAT, status=LedgerStatus.SUCCESS,
+            latency_ms=elapsed_ms, usage=response.usage, cost=response.cost,
+            guardrail_flags=response.guardrails.model_dump() if response.guardrails else None,
+            provider_reported_usage=(response.provider_raw or {}).get("usage") or response.usage.model_dump(),
+        )
+        if cache_token is not None and can_cache_response(response):
+            await cache.set(cache_key, response, ttl_seconds=settings.cache_ttl_seconds, token=cache_token)
+        print(f"[chat] response: {response.model_dump_json(indent=2)}")
+        return response
+    finally:
+        if cache_token is not None:
+            await asyncio.shield(cache.release(cache_key, cache_token))
 
 
 @router.post("/chat/stream")
@@ -289,6 +343,7 @@ async def chat_stream(
 ) -> StreamingResponse:
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
+    call_metadata = _ledger_metadata(body.metadata)
     normalised = await normalise(body, db, tenant.id)
     _require_priced_model(normalised.provider, normalised.model)
     try:
@@ -309,11 +364,15 @@ async def chat_stream(
         normalised = normalised.model_copy(update={
             "messages": [MessageParam(**m) for m in input_result.modified_messages]
         })
-    cache_key = make_cache_key(tenant.id, normalised)
-    cached = await cache.get(cache_key)
-    if cached:
+    cache_key = (
+        make_cache_key(tenant.id, normalised)
+        if can_cache_request(normalised, settings.cache_ttl_seconds) else None
+    )
+    cached = await cache.get(cache_key) if cache_key is not None else None
+    if cached and can_cache_response(cached):
+        logger.info("Response cache hit", extra={"request_id": request_id})
         await _write_ledger_entry(
-            db, request_id=request_id, tenant_id=tenant.id,
+            db, request_id=request_id, tenant_id=tenant.id, call_metadata=call_metadata,
             provider=normalised.provider, model=normalised.model,
             feature=Feature.STREAM, status=LedgerStatus.SUCCESS,
             latency_ms=int((time.monotonic() - start) * 1000),
@@ -352,124 +411,130 @@ async def chat_stream(
     transport = registry.resolve(normalised.provider, normalised.model, "stream")
 
     async def event_generator() -> AsyncIterator[str]:
-        upstream_start = time.monotonic()
-        first_token_ms: Optional[int] = None
-        final_usage = UsageBlock()
-        final_finish_reason = "stop"
-        upstream_cache_hit: Optional[bool] = None
-        accumulated_content = ""
-        accumulated_tool_calls: dict[int, dict[str, str]] = {}
+        cache_token = await cache.acquire(cache_key) if cache_key is not None else None
+        try:
+            upstream_start = time.monotonic()
+            first_token_ms: Optional[int] = None
+            final_usage = UsageBlock()
+            final_finish_reason = "stop"
+            upstream_cache_hit: Optional[bool] = None
+            accumulated_content = ""
+            accumulated_tool_calls: dict[int, dict[str, str]] = {}
 
-        final_citations: Optional[list] = None
-        final_reported_cost: Optional[float] = None
-        final_thinking_blocks: Optional[list] = None
+            final_citations: Optional[list] = None
+            final_reported_cost: Optional[float] = None
+            final_thinking_blocks: Optional[list] = None
 
-        async for event in transport.stream(normalised, tenant_key):
-            print(f"[stream] chunk type: {event.type}, data type: {type(event.data).__name__}, data: {event.data}")
-            if event.type == "token":
-                token_data: TokenData = event.data
-                accumulated_content += token_data.delta
-                if first_token_ms is None:
-                    first_token_ms = int((time.monotonic() - upstream_start) * 1000)
-                yield f"event: token\ndata: {token_data.model_dump_json()}\n\n"
-            elif event.type == "tool_use":
-                tool_data: ToolUseData = event.data
-                if tool_data.index not in accumulated_tool_calls:
-                    accumulated_tool_calls[tool_data.index] = {
-                        "id": tool_data.id, "name": tool_data.name, "args": "",
-                    }
-                accumulated_tool_calls[tool_data.index]["args"] += tool_data.arguments_delta
-                yield f"event: tool_use\ndata: {tool_data.model_dump_json()}\n\n"
-            elif event.type == "finish":
-                finish_data: TransportFinishData = event.data
-                final_usage = finish_data.usage
-                final_finish_reason = finish_data.finish_reason
-                final_citations = finish_data.citations
-                final_reported_cost = finish_data.provider_reported_usd
-                final_thinking_blocks = finish_data.thinking_blocks
-                upstream_cache_hit = (final_usage.input_tokens_cache_read or 0) > 0
-            elif event.type == "error":
-                error_data: ErrorData = event.data
-                await _write_ledger_entry(
-                    db, request_id=request_id, tenant_id=tenant.id,
-                    provider=normalised.provider, model=normalised.model,
-                    feature=Feature.STREAM, status=LedgerStatus.ERROR,
-                    latency_ms=int((time.monotonic() - start) * 1000),
-                    error_code=error_data.code,
-                )
-                yield f"event: error\ndata: {error_data.model_dump_json()}\n\n"
-                return
+            async for event in transport.stream(normalised, tenant_key):
+                print(f"[stream] chunk type: {event.type}, data type: {type(event.data).__name__}, data: {event.data}")
+                if event.type == "token":
+                    token_data: TokenData = event.data
+                    accumulated_content += token_data.delta
+                    if first_token_ms is None:
+                        first_token_ms = int((time.monotonic() - upstream_start) * 1000)
+                    yield f"event: token\ndata: {token_data.model_dump_json()}\n\n"
+                elif event.type == "tool_use":
+                    tool_data: ToolUseData = event.data
+                    if tool_data.index not in accumulated_tool_calls:
+                        accumulated_tool_calls[tool_data.index] = {
+                            "id": tool_data.id, "name": tool_data.name, "args": "",
+                        }
+                    accumulated_tool_calls[tool_data.index]["args"] += tool_data.arguments_delta
+                    yield f"event: tool_use\ndata: {tool_data.model_dump_json()}\n\n"
+                elif event.type == "finish":
+                    finish_data: TransportFinishData = event.data
+                    final_usage = finish_data.usage
+                    final_finish_reason = finish_data.finish_reason
+                    final_citations = finish_data.citations
+                    final_reported_cost = finish_data.provider_reported_usd
+                    final_thinking_blocks = finish_data.thinking_blocks
+                    upstream_cache_hit = (final_usage.input_tokens_cache_read or 0) > 0
+                elif event.type == "error":
+                    error_data: ErrorData = event.data
+                    await _write_ledger_entry(
+                        db, request_id=request_id, tenant_id=tenant.id, call_metadata=call_metadata,
+                        provider=normalised.provider, model=normalised.model,
+                        feature=Feature.STREAM, status=LedgerStatus.ERROR,
+                        latency_ms=int((time.monotonic() - start) * 1000),
+                        error_code=error_data.code,
+                    )
+                    yield f"event: error\ndata: {error_data.model_dump_json()}\n\n"
+                    return
 
-        upstream_ms = int((time.monotonic() - upstream_start) * 1000)
-        elapsed_ms = int((time.monotonic() - start) * 1000)
+            upstream_ms = int((time.monotonic() - upstream_start) * 1000)
+            elapsed_ms = int((time.monotonic() - start) * 1000)
 
-        computed_cost = _compute_cost(
-            normalised.provider, normalised.model, final_usage,
-            provider_reported_usd=final_reported_cost,
-            cache_ttl=(normalised.params.cache_options.ttl
-                       if normalised.params and normalised.params.cache_options else None),
-        )
-        finish = FinishData(
-            id=request_id,
-            finish_reason=final_finish_reason,
-            usage=final_usage,
-            cost=computed_cost,
-            latency_ms=LatencyBlock(
-                total=elapsed_ms,
-                upstream=upstream_ms,
-                time_to_first_token=first_token_ms,
-            ),
-            cache=CacheBlock(our_cache_hit=False, upstream_prompt_cache_hit=upstream_cache_hit),
-            guardrails=GuardrailsBlock(
-                input_flags=input_result.flags,
-                output_flags=[],
-                redactions_applied=input_result.redactions,
-            ),
-            policy=PolicyBlock(),
-            citations=final_citations,
-            thinking_blocks=final_thinking_blocks,
-        )
-        yield f"event: finish\ndata: {finish.model_dump_json()}\n\n"
-
-        tool_calls = [
-            {"id": tc["id"], "function": {"name": tc["name"], "arguments": tc["args"]}}
-            for _, tc in sorted(accumulated_tool_calls.items())
-        ] if accumulated_tool_calls else None
-        cached_response = ChatResponse(
-            id=request_id,
-            created=int(time.time()),
-            tenant_id=tenant.id,
-            provider=normalised.provider,
-            model=normalised.model,
-            transport=type(transport).__name__,
-            choices=[Choice(
-                index=0,
-                message=ChoiceMessage(
-                    role="assistant",
-                    content=accumulated_content or None,
-                    tool_calls=tool_calls,
-                    citations=final_citations,
-                    thinking_blocks=final_thinking_blocks,
-                ),
+            computed_cost = _compute_cost(
+                normalised.provider, normalised.model, final_usage,
+                provider_reported_usd=final_reported_cost,
+                cache_ttl=(normalised.params.cache_options.ttl
+                           if normalised.params and normalised.params.cache_options else None),
+            )
+            finish = FinishData(
+                id=request_id,
                 finish_reason=final_finish_reason,
-            )],
-            usage=final_usage,
-            cost=computed_cost,
-            latency_ms=finish.latency_ms,
-            cache=CacheBlock(our_cache_hit=False, upstream_prompt_cache_hit=upstream_cache_hit),
-            guardrails=finish.guardrails,
-            policy=PolicyBlock(),
-        )
-        await cache.set(cache_key, cached_response, ttl_seconds=settings.cache_ttl_seconds)
-        await _write_ledger_entry(
-            db, request_id=request_id, tenant_id=tenant.id,
-            provider=normalised.provider, model=normalised.model,
-            feature=Feature.STREAM, status=LedgerStatus.SUCCESS,
-            latency_ms=elapsed_ms, time_to_first_token_ms=first_token_ms,
-            usage=final_usage, cost=computed_cost,
-            guardrail_flags=finish.guardrails.model_dump() if finish.guardrails else None,
-            provider_reported_usage=final_usage.model_dump(),
-        )
+                usage=final_usage,
+                cost=computed_cost,
+                latency_ms=LatencyBlock(
+                    total=elapsed_ms,
+                    upstream=upstream_ms,
+                    time_to_first_token=first_token_ms,
+                ),
+                cache=CacheBlock(our_cache_hit=False, upstream_prompt_cache_hit=upstream_cache_hit),
+                guardrails=GuardrailsBlock(
+                    input_flags=input_result.flags,
+                    output_flags=[],
+                    redactions_applied=input_result.redactions,
+                ),
+                policy=PolicyBlock(),
+                citations=final_citations,
+                thinking_blocks=final_thinking_blocks,
+            )
+            yield f"event: finish\ndata: {finish.model_dump_json()}\n\n"
+
+            tool_calls = [
+                {"id": tc["id"], "function": {"name": tc["name"], "arguments": tc["args"]}}
+                for _, tc in sorted(accumulated_tool_calls.items())
+            ] if accumulated_tool_calls else None
+            cached_response = ChatResponse(
+                id=request_id,
+                created=int(time.time()),
+                tenant_id=tenant.id,
+                provider=normalised.provider,
+                model=normalised.model,
+                transport=type(transport).__name__,
+                choices=[Choice(
+                    index=0,
+                    message=ChoiceMessage(
+                        role="assistant",
+                        content=accumulated_content or None,
+                        tool_calls=tool_calls,
+                        citations=final_citations,
+                        thinking_blocks=final_thinking_blocks,
+                    ),
+                    finish_reason=final_finish_reason,
+                )],
+                usage=final_usage,
+                cost=computed_cost,
+                latency_ms=finish.latency_ms,
+                cache=CacheBlock(our_cache_hit=False, upstream_prompt_cache_hit=upstream_cache_hit),
+                guardrails=finish.guardrails,
+                policy=PolicyBlock(),
+            )
+            if cache_token is not None and can_cache_response(cached_response):
+                await cache.set(cache_key, cached_response, ttl_seconds=settings.cache_ttl_seconds, token=cache_token)
+            await _write_ledger_entry(
+                db, request_id=request_id, tenant_id=tenant.id, call_metadata=call_metadata,
+                provider=normalised.provider, model=normalised.model,
+                feature=Feature.STREAM, status=LedgerStatus.SUCCESS,
+                latency_ms=elapsed_ms, time_to_first_token_ms=first_token_ms,
+                usage=final_usage, cost=computed_cost,
+                guardrail_flags=finish.guardrails.model_dump() if finish.guardrails else None,
+                provider_reported_usage=final_usage.model_dump(),
+            )
+        finally:
+            if cache_token is not None:
+                await asyncio.shield(cache.release(cache_key, cache_token))
 
     return StreamingResponse(
         event_generator(),

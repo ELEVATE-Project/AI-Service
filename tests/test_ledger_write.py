@@ -354,7 +354,8 @@ async def test_chat_and_stream_price_writes_with_ttl_and_preserve_ledger(
     monkeypatch.setattr(litellm, "acompletion", _fake_acompletion)
     monkeypatch.setattr(registry, "resolve", lambda *args: LiteLLMTransport())
     key = TenantKeyPayload(key_format=KeyFormat.API_KEY, data={"api_key": "test-only"})
-    cache = SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock())
+    cache = SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock(),
+                            acquire=AsyncMock(return_value="owner"), release=AsyncMock())
     db = _FakeSession()
     req = ChatRequest(
         provider="anthropic", model="claude-haiku-4-5",

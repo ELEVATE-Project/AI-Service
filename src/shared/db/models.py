@@ -264,6 +264,15 @@ class LedgerEntry(Base):
         JSONB, nullable=True,
         comment="Presidio/Llama-Guard events: which rules fired and what was redacted.",
     )
+    # Optional and additive: rows from callers that send no request metadata keep both NULL.
+    call_metadata: Mapped[Optional[dict[str, Any]]] = mapped_column(
+        JSONB(none_as_null=True), nullable=True,
+        comment="Allow-listed ids from the request metadata (session, bot, turn, call kind). Ids only, never text.",
+    )
+    session_id: Mapped[Optional[str]] = mapped_column(
+        String, nullable=True, index=True,
+        comment="Caller's chat session id, copied from call_metadata so a session's calls can be found by index.",
+    )
 
 
 class BatchJob(Base):

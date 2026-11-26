@@ -104,7 +104,9 @@ async def test_stream_route_prices_and_ledgers_mixed_ttl_split(real_anthropic_st
         secret_backend=SimpleNamespace(get_key=AsyncMock(return_value=KEY)),
         policy_checker=SimpleNamespace(check=AsyncMock()),
         guardrails=SimpleNamespace(check_input=AsyncMock(return_value=GuardrailsResult())),
-        cache=SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock()), db=db,
+        # acquire() returns None: no lock is held, so the route skips the cache write.
+        cache=SimpleNamespace(get=AsyncMock(return_value=None), set=AsyncMock(),
+                              acquire=AsyncMock(return_value=None), release=AsyncMock()), db=db,
     )
     events = [event async for event in response.body_iterator]
     payload = json.loads(next(e.split("data: ", 1)[1] for e in events if e.startswith("event: finish")))

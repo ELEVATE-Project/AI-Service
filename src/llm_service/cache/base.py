@@ -11,4 +11,13 @@ class CacheBackend(ABC):
     async def get(self, key: str) -> Optional[ChatResponse]: ...
 
     @abstractmethod
-    async def set(self, key: str, response: ChatResponse, ttl_seconds: int) -> None: ...
+    async def set(self, key: str, response: ChatResponse, ttl_seconds: int, token: str) -> None:
+        """Store the answer only while the lock `lock:<key>` still holds this owner's token."""
+
+    @abstractmethod
+    async def acquire(self, key: str) -> Optional[str]:
+        """Try to reserve cache population without waiting; return the owner's token."""
+
+    @abstractmethod
+    async def release(self, key: str, token: str) -> None:
+        """Release only the reservation owned by this token."""

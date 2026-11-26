@@ -322,7 +322,7 @@ def test_reasoning_registered_without_download():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("provider,model,old_model", PATHS)
-async def test_stream_finish_cached_message_and_replay(wire, monkeypatch, provider, model, old_model):
+async def test_stream_finish_and_continuation_do_not_cache_thinking(wire, monkeypatch, provider, model, old_model):
     from starlette.requests import Request
     from src.llm_service.api.rest import chat as api
     from src.llm_service.schemas.chat import ChatRequest
@@ -344,19 +344,16 @@ async def test_stream_finish_cached_message_and_replay(wire, monkeypatch, provid
     finish = json.loads(next(part.split("data: ", 1)[1] for part in events if part.startswith("event: finish")))
     assert finish["thinking_blocks"] == blocks(provider)
     assert not any(part.startswith("event: token") for part in events)
-    cached = cache.set.call_args.args[1]
-    message = cached.choices[0].message
-    assert message.content is None
-    assert message.thinking_blocks == blocks(provider)
-    assert message.tool_calls[0]["function"] == TOOL_CALL["function"]
-    cache.get.return_value = cached
+    cache.get.assert_not_awaited()
+    cache.set.assert_not_awaited()
     calls = len(wire.bodies)
     response = await api.chat_stream(body, **dependencies)
     replay = [part async for part in response.body_iterator]
     replay_finish = json.loads(next(part.split("data: ", 1)[1] for part in replay if part.startswith("event: finish")))
     assert replay_finish["thinking_blocks"] == blocks(provider)
-    assert len(wire.bodies) == calls
-    # The assembled gateway message is also suitable for the next tool-loop call.
+    assert len(wire.bodies) == calls + 1
+    # Opaque reasoning remains available for the next tool-loop call without caching it.
+    message = MessageParam(role="assistant", thinking_blocks=finish["thinking_blocks"], tool_calls=[TOOL_CALL])
     continuation = request(provider, model, params=body.params, tools=TOOLS, messages=[
         MessageParam(role="user", content="hi"), MessageParam(**message.model_dump()),
         MessageParam(role="tool", tool_call_id="toolu_test", content="result"),

@@ -59,7 +59,7 @@ Returns the full response in one go.
 | `tools` | `Tool[]` | No | Function definitions the model can call |
 | `tool_choice` | `string \| object` | No | `"auto"`, `"none"`, `"required"`, or `{"type":"function","function":{"name":"..."}}` |
 | `params` | `ChatParams` | No | Inference parameters. All fields optional. |
-| `metadata` | `object` | No | Free-form. Pass `{"batch": true}` to submit asynchronously. Not sent upstream. |
+| `metadata` | `object` | No | Free-form. Pass `{"batch": true}` to submit asynchronously. Not sent upstream. Optional ids are saved on the ledger row: `session_id`, `bot_id`, `bot_history_id`, `turn_id`, `call_kind`, `language`, `batch` (strings up to 64 chars, numbers, booleans; other keys are ignored there). Requests without `metadata` work as before. |
 | `provider_options` | `object` | No | Provider-specific passthrough. Consumed only for `provider: "openrouter"` — keys: `provider` (routing prefs), `models` (fallback list), `plugins` (e.g. web search), `referer` / `title` (app attribution). See [Provider Layer → OpenRouter](providers.md#openrouter). |
 | `use_defaults` | `bool` | No | `false`/omitted (default): `provider`/`model` are required as usual — today's behavior, unchanged. `true`: opts into filling, field-by-field, any of `provider`, `model`, or individual `params` fields the request left unset from the tenant's `tenant_defaults` row, if one exists. Defaults only fill gaps — any field the request *does* set (including a single `params` field like `max_tokens` while leaving `temperature` unset) is never overridden. See [Tenants → Tenant Defaults](auth-and-tenants.md) for the merge rule and a worked example. |
 

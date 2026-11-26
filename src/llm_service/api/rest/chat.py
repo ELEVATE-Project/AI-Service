@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -35,21 +36,40 @@ from src.shared.schemas.envelope import CostBlock, GuardrailsBlock, LatencyBlock
 from src.shared.secrets.backend import MissingTenantKeyError, SecretBackend
 
 router = APIRouter(prefix="/v1")
+logger = logging.getLogger(__name__)
+_PROVIDER_PRICED = frozenset({"openrouter"})
 
 
 def _new_request_id() -> str:
     return f"req_{uuid.uuid4().hex[:24]}"
 
 
+def is_chat_admitted(provider: str, model: str) -> bool:
+    """True when POST /v1/chat will accept this model (OpenRouter, or a priced model)."""
+    return provider in _PROVIDER_PRICED or pricing_table.has_model(provider, model)
+
+
+def _require_priced_model(provider: str, model: str) -> None:
+    if not is_chat_admitted(provider, model):
+        raise HTTPException(status_code=422, detail={
+            "code": "unpriced_model",
+            "message": f"No pricing configured for {provider}/{model}",
+        })
+
+
 def _compute_cost(
     provider: str, model: str, usage: "UsageBlock",
     provider_reported_usd: Optional[float] = None,
+    *, cache_ttl: Optional[str] = None,
 ) -> CostBlock:
-    """Build the cost envelope: YAML-computed cost, falling back to provider-reported cost.
+    """Build the cost envelope, with a provider-reported fallback for OpenRouter.
 
-    computed_usd is always the figure callers should use: it comes from YAML pricing
-    when available, otherwise from provider_reported_usd. provider_reported_usd is kept
-    alongside as the raw provider figure for reference/auditing.
+    computed_usd is always the figure callers should use. For OpenRouter with a YAML
+    price it is the higher of the YAML cost and the provider's figure, so neither a
+    static rate nor a provider figure (a key may carry a custom api_base, so it is not
+    fully trusted) can lower what is recorded against the budget. Without a YAML
+    price it is the provider's figure. Other providers use YAML only. The raw provider
+    figure is kept alongside for reference/auditing.
     """
     try:
         cost = pricing_table.compute_cost(
@@ -59,11 +79,19 @@ def _compute_cost(
             tokens_out=usage.output_tokens,
             cache_write_tokens=usage.input_tokens_cache_write or 0,
             cache_read_tokens=usage.input_tokens_cache_read or 0,
+            cache_write_5m_tokens=usage.input_tokens_cache_write_5m,
+            cache_write_1h_tokens=usage.input_tokens_cache_write_1h,
+            cache_ttl=cache_ttl,
         )
     except UnknownModelError:
+        if provider not in _PROVIDER_PRICED:
+            logger.error("Missing pricing after provider call for %s/%s; refusing to record a zero cost", provider, model)
+            raise
         cost = CostBlock(computed_usd=provider_reported_usd or 0.0)
     if provider_reported_usd is not None:
         cost = cost.model_copy(update={"provider_reported_usd": provider_reported_usd})
+        if provider in _PROVIDER_PRICED and provider_reported_usd > cost.computed_usd:
+            cost = cost.model_copy(update={"computed_usd": provider_reported_usd})
     return cost
 
 
@@ -147,6 +175,9 @@ async def chat(
     request_id = request.headers.get("x-request-id") or _new_request_id()
     print(f"[chat] request: {body.model_dump_json(indent=2)}")
     normalised = await normalise(body, db, tenant.id)
+    # Batch admission is a separate path; this check covers synchronous chat.
+    if not (body.metadata and body.metadata.get("batch") is True):
+        _require_priced_model(normalised.provider, normalised.model)
     try:
         tenant_key = await secret_backend.get_key(tenant.id, normalised.provider)
     except MissingTenantKeyError:
@@ -231,6 +262,8 @@ async def chat(
     response.cost = _compute_cost(
         normalised.provider, normalised.model, response.usage,
         provider_reported_usd=response.cost.provider_reported_usd,
+        cache_ttl=(normalised.params.cache_options.ttl
+                   if normalised.params and normalised.params.cache_options else None),
     )
     await _write_ledger_entry(
         db, request_id=request_id, tenant_id=tenant.id,
@@ -257,6 +290,7 @@ async def chat_stream(
     start = time.monotonic()
     request_id = request.headers.get("x-request-id") or _new_request_id()
     normalised = await normalise(body, db, tenant.id)
+    _require_priced_model(normalised.provider, normalised.model)
     try:
         tenant_key = await secret_backend.get_key(tenant.id, normalised.provider)
     except MissingTenantKeyError:
@@ -297,6 +331,7 @@ async def chat_stream(
             guardrails=cached.guardrails,
             policy=cached.policy,
             citations=cached.choices[0].message.citations,
+            thinking_blocks=cached.choices[0].message.thinking_blocks,
         )
 
         async def _cached_stream() -> AsyncIterator[str]:
@@ -327,6 +362,7 @@ async def chat_stream(
 
         final_citations: Optional[list] = None
         final_reported_cost: Optional[float] = None
+        final_thinking_blocks: Optional[list] = None
 
         async for event in transport.stream(normalised, tenant_key):
             print(f"[stream] chunk type: {event.type}, data type: {type(event.data).__name__}, data: {event.data}")
@@ -350,6 +386,7 @@ async def chat_stream(
                 final_finish_reason = finish_data.finish_reason
                 final_citations = finish_data.citations
                 final_reported_cost = finish_data.provider_reported_usd
+                final_thinking_blocks = finish_data.thinking_blocks
                 upstream_cache_hit = (final_usage.input_tokens_cache_read or 0) > 0
             elif event.type == "error":
                 error_data: ErrorData = event.data
@@ -369,6 +406,8 @@ async def chat_stream(
         computed_cost = _compute_cost(
             normalised.provider, normalised.model, final_usage,
             provider_reported_usd=final_reported_cost,
+            cache_ttl=(normalised.params.cache_options.ttl
+                       if normalised.params and normalised.params.cache_options else None),
         )
         finish = FinishData(
             id=request_id,
@@ -388,6 +427,7 @@ async def chat_stream(
             ),
             policy=PolicyBlock(),
             citations=final_citations,
+            thinking_blocks=final_thinking_blocks,
         )
         yield f"event: finish\ndata: {finish.model_dump_json()}\n\n"
 
@@ -409,6 +449,7 @@ async def chat_stream(
                     content=accumulated_content or None,
                     tool_calls=tool_calls,
                     citations=final_citations,
+                    thinking_blocks=final_thinking_blocks,
                 ),
                 finish_reason=final_finish_reason,
             )],

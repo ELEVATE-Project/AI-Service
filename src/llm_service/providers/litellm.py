@@ -144,6 +144,22 @@ def _build_fallbacks(
     ]
 
 
+# =============================================================================
+# READ BEFORE UPGRADING LITELLM
+# The three _patch_* functions below change LiteLLM internals. They were written
+# and tested against LiteLLM 1.83.0 (the version in uv.lock):
+#   1. _patch_anthropic_hidden_original_response  (AnthropicConfig.transform_response)
+#   2. _patch_stream_keeps_reasoning_details_only_chunks
+#        (CustomStreamWrapper.is_chunk_non_empty)
+#   3. _patch_stream_keeps_cache_write_ttl_split
+#        (ChunkProcessor._calculate_usage_per_chunk)
+# If a hook is renamed or removed, a patch silently does nothing and the gateway
+# loses reasoning blocks or cache-duration pricing again. After any LiteLLM bump:
+#   - run the full test suite; tests/test_haiku_55.py and
+#     tests/test_anthropic_stream_cache_split.py fail on purpose when a patch is
+#     missing;
+#   - check whether the new LiteLLM already fixes the problem, then delete the patch.
+# =============================================================================
 def _patch_anthropic_hidden_original_response() -> None:
     """Work around a LiteLLM bug (confirmed against litellm==1.83.0) that discards the
     raw, ordered Anthropic content-block array before ``litellm.acompletion()`` ever
@@ -199,6 +215,152 @@ def _patch_anthropic_hidden_original_response() -> None:
 
 
 _patch_anthropic_hidden_original_response()
+
+
+def _patch_stream_keeps_reasoning_details_only_chunks() -> None:
+    """Stop LiteLLM's stream wrapper dropping OpenRouter chunks that carry only ``reasoning_details``.
+
+    OpenRouter streams Anthropic's encrypted/redacted reasoning as deltas whose only field is
+    ``reasoning_details`` (no ``reasoning`` text, no content, no tool call). The OpenRouter chunk
+    parser keeps that field on the delta, but ``CustomStreamWrapper.is_chunk_non_empty`` does not
+    look at it, so LiteLLM 1.83.0 treats the chunk as empty and never yields it. The finish event
+    would then miss blocks, and Anthropic rejects a tool-loop replay whose blocks are incomplete.
+
+    Wrap the check so a delta with non-empty ``reasoning_details`` counts as non-empty. Every
+    other chunk still goes through the original check. Idempotent; if LiteLLM changes the hook
+    this does nothing, and ``tests/test_haiku_55.py`` fails loudly instead.
+    """
+    try:
+        from litellm.litellm_core_utils.streaming_handler import CustomStreamWrapper
+        original = CustomStreamWrapper.is_chunk_non_empty
+        if getattr(original, "_ai_service_patched", False):
+            return
+    except (ImportError, AttributeError):
+        return
+
+    def _patched(self: Any, completion_obj: Any, model_response: Any, response_obj: Any) -> bool:
+        if original(self, completion_obj, model_response, response_obj):
+            return True
+        try:
+            delta = model_response.choices[0].delta
+            return bool(getattr(delta, "reasoning_details", None))
+        except Exception:
+            return False
+
+    _patched._ai_service_patched = True  # type: ignore[attr-defined]
+    CustomStreamWrapper.is_chunk_non_empty = _patched
+
+
+_patch_stream_keeps_reasoning_details_only_chunks()
+
+
+def _patch_stream_keeps_cache_write_ttl_split() -> None:
+    """Keep Anthropic's 5m/1h cache-write split in LiteLLM's assembled stream usage.
+
+    Anthropic sends ``usage.cache_creation`` ({ephemeral_5m_input_tokens, ephemeral_1h_input_tokens})
+    only in ``message_start``. ``ChunkProcessor._calculate_usage_per_chunk`` (LiteLLM 1.83.0) then
+    overwrites ``prompt_tokens_details`` with the one from the LAST usage chunk (``message_delta``),
+    which has no split. Those chunks never reach our stream loop, only the assembled usage does, so
+    the split would be lost and mixed-TTL writes priced at one rate.
+
+    Wrap the method: when the assembled details have no split, copy in the last split seen on any
+    chunk, but only if 5m + 1h equals the aggregate write count (otherwise leave usage unchanged).
+    Counts are never changed. Idempotent; if LiteLLM changes the hook this does nothing and
+    ``tests/test_anthropic_stream_cache_split.py`` fails loudly.
+    """
+    try:
+        from litellm.litellm_core_utils.streaming_chunk_builder_utils import ChunkProcessor
+        original = ChunkProcessor._calculate_usage_per_chunk
+        if getattr(original, "_ai_service_patched", False):
+            return
+    except (ImportError, AttributeError):
+        return
+
+    def _patched(self: Any, chunks: Any) -> Any:
+        result = original(self, chunks)
+        try:
+            details = result.get("prompt_tokens_details")
+            if details is None or getattr(details, "cache_creation_token_details", None) is not None:
+                return result
+            split = None
+            for chunk in chunks:
+                usage = chunk["usage"] if "usage" in chunk else (
+                    (getattr(chunk, "_hidden_params", None) or {}).get("usage"))
+                found = getattr(getattr(usage, "prompt_tokens_details", None),
+                                "cache_creation_token_details", None)
+                if found is not None:
+                    split = found
+            if split is not None:
+                total = (getattr(split, "ephemeral_5m_input_tokens", 0) or 0) + (
+                    getattr(split, "ephemeral_1h_input_tokens", 0) or 0)
+                if total and total == result.get("cache_creation_input_tokens"):
+                    details = details.model_copy()
+                    details.cache_creation_token_details = split
+                    result["prompt_tokens_details"] = details
+        except Exception:
+            pass
+        return result
+
+    _patched._ai_service_patched = True  # type: ignore[attr-defined]
+    ChunkProcessor._calculate_usage_per_chunk = _patched
+
+
+_patch_stream_keeps_cache_write_ttl_split()
+
+# LiteLLM 1.83.0's bundled cost map predates Haiku 5.5. Register capability
+# locally so drop_params=True retains thinking even without a price-map download.
+# Billing continues to use pricing/models.yaml, not LiteLLM's cost map.
+litellm.register_model({
+    "anthropic/claude-haiku-5-5": {
+        "litellm_provider": "anthropic", "mode": "chat", "supports_reasoning": True,
+    },
+})
+
+
+def _thinking_blocks(message: Any) -> Optional[list[dict[str, Any]]]:
+    """Keep provider blocks opaque, including OpenRouter's IDs and format fields."""
+    fields = getattr(message, "provider_specific_fields", None) or {}
+    return (
+        getattr(message, "reasoning_details", None)
+        or fields.get("reasoning_details")
+        or getattr(message, "thinking_blocks", None)
+        or fields.get("thinking_blocks")
+    )
+
+
+_REASONING_TEXT_KEYS = {"text", "summary", "data", "signature"}
+
+
+def _same_reasoning_block(block: dict[str, Any], delta: dict[str, Any]) -> bool:
+    """A delta belongs to a block when the index matches and no type/id disagrees."""
+    if delta.get("index") is not None:
+        if block.get("index") != delta["index"]:
+            return False
+        if None not in (block.get("type"), delta.get("type")) and block["type"] != delta["type"]:
+            return False
+    elif delta.get("id") is None or block.get("id") != delta["id"]:
+        return False
+    return block.get("id") is None or delta.get("id") is None or block["id"] == delta["id"]
+
+
+def _merge_reasoning_details(
+    blocks: list[dict[str, Any]], deltas: list[dict[str, Any]],
+) -> None:
+    """OpenRouter streams fragments by block index. Keep their original order/shape."""
+    for delta in deltas:
+        existing = next(
+            (block for block in reversed(blocks) if _same_reasoning_block(block, delta)), None,
+        )
+        if existing is None:
+            blocks.append(dict(delta))
+            continue
+        for key, value in delta.items():
+            if value is None and existing.get(key) is not None:
+                continue  # OpenRouter sends explicit nulls; never erase a stored value
+            if key in _REASONING_TEXT_KEYS and isinstance(value, str):
+                existing[key] = (existing.get(key) or "") + value
+            else:
+                existing[key] = value
 
 
 def _dedupe_leading_narration(raw: Any, flattened_content: Optional[str]) -> Optional[str]:
@@ -313,7 +475,7 @@ class LiteLLMTransport(BaseLLMProvider):
             }
         raise ValueError(f"Unsupported key_format: {key.key_format!r}")
 
-    def _param_kwargs(self, params: Optional[Any]) -> dict[str, Any]:
+    def _param_kwargs(self, params: Optional[Any], provider: str = "") -> dict[str, Any]:
         if not params:
             return {}
         kwargs: dict[str, Any] = {}
@@ -333,6 +495,13 @@ class LiteLLMTransport(BaseLLMProvider):
             )
         if params.web_search_options is not None:
             kwargs["web_search_options"] = params.web_search_options.model_dump(exclude_none=True)
+        # Never use reasoning_effort for Anthropic: 1.83.0 translates it to the
+        # old thinking.budget_tokens format, rejected by Haiku 5.5.
+        if provider != "openrouter":
+            if params.thinking is not None:
+                kwargs["thinking"] = params.thinking
+            if params.output_config is not None:
+                kwargs["output_config"] = params.output_config.model_dump(exclude_none=True)
         return kwargs
 
     def _openrouter_kwargs(self, request: NormalisedLLMRequest) -> dict[str, Any]:
@@ -353,6 +522,20 @@ class LiteLLMTransport(BaseLLMProvider):
         options = request.provider_options or {}
 
         extra_body: dict[str, Any] = {}
+        if request.params is not None:
+            reasoning: dict[str, Any] = {}
+            thinking = request.params.thinking
+            if thinking is not None:
+                if thinking.get("type") in {"adaptive", "enabled", "disabled"}:
+                    reasoning["enabled"] = thinking["type"] != "disabled"
+                if thinking.get("budget_tokens") is not None:
+                    reasoning["max_tokens"] = thinking["budget_tokens"]
+            output = request.params.output_config
+            if output is not None and output.effort is not None:
+                reasoning["effort"] = output.effort
+            if reasoning:
+                # Bypass LiteLLM's model-dependent reasoning_effort conversion.
+                extra_body["reasoning"] = reasoning
         if options.get("provider") is not None:
             extra_body["provider"] = options["provider"]
         if options.get("models") is not None:
@@ -409,6 +592,8 @@ class LiteLLMTransport(BaseLLMProvider):
         result: list[dict[str, Any]] = []
         for i, message in enumerate(messages):
             serialised = message.model_dump(exclude={"cache"}, exclude_none=True)
+            if provider == "openrouter" and "thinking_blocks" in serialised:
+                serialised["reasoning_details"] = serialised.pop("thinking_blocks")
             should_cache = message.cache == "ephemeral" or i == last_system_idx
             if not should_cache or provider not in CACHE_CAPABLE_PROVIDERS:
                 result.append(serialised)
@@ -463,12 +648,24 @@ class LiteLLMTransport(BaseLLMProvider):
         cache_read = getattr(raw_usage, "cache_read_input_tokens", cache_read) or cache_read
         cache_write = getattr(raw_usage, "cache_creation_input_tokens", cache_write) or cache_write
 
+        # LiteLLM 1.83 maps Anthropic's cache_creation to this nested wrapper.
+        # Also accept the provider's original cache_creation dict/object shape.
+        details = getattr(raw_usage, "prompt_tokens_details", None)
+        split = getattr(details, "cache_creation_token_details", None)
+        if split is None:
+            split = getattr(raw_usage, "cache_creation", None)
+
+        def _split_count(name: str) -> Optional[int]:
+            return split.get(name) if isinstance(split, dict) else getattr(split, name, None)
+
         return UsageBlock(
             input_tokens=getattr(raw_usage, "prompt_tokens", 0) or 0,
             output_tokens=getattr(raw_usage, "completion_tokens", 0) or 0,
             input_tokens_cache_read=cache_read or None,
             input_tokens_cache_write=cache_write or None,
             total_tokens=getattr(raw_usage, "total_tokens", 0) or 0,
+            input_tokens_cache_write_5m=_split_count("ephemeral_5m_input_tokens"),
+            input_tokens_cache_write_1h=_split_count("ephemeral_1h_input_tokens"),
         )
 
     def _normalize_citations(self, raw_message: Any) -> Optional[list[Any]]:
@@ -523,6 +720,7 @@ class LiteLLMTransport(BaseLLMProvider):
                     content=content,
                     tool_calls=tool_calls,
                     citations=citations,
+                    thinking_blocks=_thinking_blocks(raw_message),
                 ),
                 finish_reason=raw_choice.finish_reason or "stop",
             ))
@@ -534,7 +732,7 @@ class LiteLLMTransport(BaseLLMProvider):
         model_str = self._model_string(request.provider, request.model)
         messages = self._serialize_messages(request.messages, request.provider, request.params)
         credential_kwargs = self._credential_kwargs(key)
-        param_kwargs = self._param_kwargs(request.params)
+        param_kwargs = self._param_kwargs(request.params, request.provider)
 
         if self._regions:
             if "aws_region_name" in credential_kwargs:
@@ -603,7 +801,7 @@ class LiteLLMTransport(BaseLLMProvider):
         model_str = self._model_string(request.provider, request.model)
         messages = self._serialize_messages(request.messages, request.provider, request.params)
         credential_kwargs = self._credential_kwargs(key)
-        param_kwargs = self._param_kwargs(request.params)
+        param_kwargs = self._param_kwargs(request.params, request.provider)
 
         if self._regions:
             if "aws_region_name" in credential_kwargs:
@@ -662,6 +860,8 @@ class LiteLLMTransport(BaseLLMProvider):
         final_citations: Optional[list[Any]] = None
         reported_cost: Optional[float] = None
         all_chunks: list[Any] = []
+        final_thinking_blocks: Optional[list[dict[str, Any]]] = None
+        reasoning_details: list[dict[str, Any]] = []
 
         # Once iteration starts we cannot retry — emit an error event on failure.
         try:
@@ -677,6 +877,10 @@ class LiteLLMTransport(BaseLLMProvider):
                     continue
 
                 choice = chunk.choices[0]
+                if request.provider == "openrouter":
+                    details = _thinking_blocks(choice.delta)
+                    if details:
+                        _merge_reasoning_details(reasoning_details, details)
                 delta_content = getattr(choice.delta, "content", None) or ""
 
                 if delta_content:
@@ -728,6 +932,7 @@ class LiteLLMTransport(BaseLLMProvider):
                 if assembled and assembled.choices:
                     assembled_message = assembled.choices[0].message
                     final_citations = self._normalize_citations(assembled_message)
+                    final_thinking_blocks = _thinking_blocks(assembled_message)
                     if reported_cost is None:
                         reported_cost = _extract_response_cost(assembled)
             except Exception:
@@ -740,6 +945,7 @@ class LiteLLMTransport(BaseLLMProvider):
                 usage=final_usage,
                 citations=final_citations,
                 provider_reported_usd=reported_cost,
+                thinking_blocks=reasoning_details or final_thinking_blocks,
             ),
         )
 

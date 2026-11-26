@@ -126,6 +126,10 @@ _PROVIDER_REMAP: dict[str, str] = {
 
 That is the only code change for Path A.
 
+Pricing is separate. For any provider except OpenRouter, add the model to
+`pricing/models.yaml`. Without an entry, `POST /v1/chat` returns `422 unpriced_model`,
+and `GET /v1/models` shows `chat_admitted: false` for that model.
+
 ---
 
 ## Path B — Direct adapter

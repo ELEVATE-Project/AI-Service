@@ -221,23 +221,37 @@ def _thinking_blocks(message: Any) -> Optional[list[dict[str, Any]]]:
     )
 
 
+_REASONING_TEXT_KEYS = {"text", "summary", "data", "signature"}
+
+
+def _same_reasoning_block(block: dict[str, Any], delta: dict[str, Any]) -> bool:
+    """A delta belongs to a block when the index matches and no type/id disagrees."""
+    if delta.get("index") is not None:
+        if block.get("index") != delta["index"]:
+            return False
+        if None not in (block.get("type"), delta.get("type")) and block["type"] != delta["type"]:
+            return False
+    elif delta.get("id") is None or block.get("id") != delta["id"]:
+        return False
+    return block.get("id") is None or delta.get("id") is None or block["id"] == delta["id"]
+
+
 def _merge_reasoning_details(
     blocks: list[dict[str, Any]], deltas: list[dict[str, Any]],
 ) -> None:
     """OpenRouter streams fragments by block index. Keep their original order/shape."""
     for delta in deltas:
-        existing = next((block for block in blocks if (
-            delta.get("index") is not None and block.get("index") == delta["index"]
-        ) or (
-            delta.get("index") is None and delta.get("id") is not None
-            and block.get("id") == delta["id"]
-        )), None)
+        existing = next(
+            (block for block in reversed(blocks) if _same_reasoning_block(block, delta)), None,
+        )
         if existing is None:
             blocks.append(dict(delta))
             continue
         for key, value in delta.items():
-            if key in {"text", "summary", "data", "signature"} and isinstance(value, str):
-                existing[key] = existing.get(key, "") + value
+            if key in _REASONING_TEXT_KEYS and isinstance(value, str):
+                existing[key] = (existing.get(key) or "") + value
+            elif key in _REASONING_TEXT_KEYS and value is None and existing.get(key):
+                continue
             else:
                 existing[key] = value
 

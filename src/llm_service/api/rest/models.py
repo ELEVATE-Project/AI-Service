@@ -6,6 +6,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from src.llm_service.api.deps import get_secret_backend, get_tenant
+from src.llm_service.api.rest.chat import is_chat_admitted
 from src.llm_service.providers.catalog import (
     get_openrouter_model_endpoints, known_litellm_providers, known_modes,
     list_litellm_models, list_openrouter_models,
@@ -67,6 +68,10 @@ async def list_models(
     if provider is None or provider in litellm_providers:
         wanted = {provider} if provider else litellm_providers
         models.extend(list_litellm_models(wanted))
+
+    # Discovery lists every model, but chat only admits OpenRouter or priced models.
+    for m in models:
+        m.chat_admitted = is_chat_admitted(m.provider, m.id)
 
     if mode:
         models = [m for m in models if m.mode == mode]

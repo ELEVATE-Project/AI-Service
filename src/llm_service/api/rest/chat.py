@@ -44,8 +44,13 @@ def _new_request_id() -> str:
     return f"req_{uuid.uuid4().hex[:24]}"
 
 
+def is_chat_admitted(provider: str, model: str) -> bool:
+    """True when POST /v1/chat will accept this model (OpenRouter, or a priced model)."""
+    return provider in _PROVIDER_PRICED or pricing_table.has_model(provider, model)
+
+
 def _require_priced_model(provider: str, model: str) -> None:
-    if provider not in _PROVIDER_PRICED and not pricing_table.has_model(provider, model):
+    if not is_chat_admitted(provider, model):
         raise HTTPException(status_code=422, detail={
             "code": "unpriced_model",
             "message": f"No pricing configured for {provider}/{model}",

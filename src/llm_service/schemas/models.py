@@ -26,6 +26,10 @@ class ModelInfo(BaseModel):
     supports_vision: Optional[bool] = None
     supports_reasoning: Optional[bool] = None
     source: Literal["litellm", "openrouter"]
+    # True when POST /v1/chat accepts this model. Non-OpenRouter models need an
+    # entry in pricing/models.yaml, otherwise chat returns 422 unpriced_model.
+    # Batch and non-chat uses are not limited by this flag.
+    chat_admitted: bool = False
     # Complete, unmodified source record — every field the upstream source
     # exposes, so new fields show up here without a schema change.
     raw: dict[str, Any]

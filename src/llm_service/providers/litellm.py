@@ -18,6 +18,7 @@ import litellm
 from src.llm_service.providers.base import (
     BaseLLMProvider, StreamEvent, TransportFinishData, UpstreamTransportError,
 )
+from src.llm_service.providers.litellm_stream_usage import install_stream_usage_tap
 from src.llm_service.schemas.chat import (
     CACHE_CAPABLE_PROVIDERS, CACHE_TARGET_DEFAULT, CacheBlock, ChatResponse, Choice,
     ChoiceMessage, ErrorData, NormalisedLLMRequest, TokenData, ToolUseData, UsageBlock,
@@ -746,6 +747,7 @@ class LiteLLMTransport(BaseLLMProvider):
                     return
                 await asyncio.sleep(_retry_delay(error, attempt, backoff_base_s))
 
+        usage_tap = install_stream_usage_tap(response_stream)
         final_usage = UsageBlock()
         final_finish_reason = "stop"
         final_citations: Optional[list[Any]] = None
@@ -814,6 +816,13 @@ class LiteLLMTransport(BaseLLMProvider):
                 ),
             )
             return
+
+        # LiteLLM's rebuilt usage drops OpenRouter's search count and cost; use
+        # the raw-chunk capture only where LiteLLM gave nothing.
+        if final_usage.web_search_requests is None:
+            final_usage.web_search_requests = usage_tap.web_search_requests
+        if reported_cost is None:
+            reported_cost = usage_tap.cost
 
         # Citations are only on the assembled response, not individual chunks.
         # stream_chunk_builder rebuilds the full ModelResponse from collected chunks.

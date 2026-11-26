@@ -114,6 +114,11 @@ Streaming returns the assembled array in the `finish` event's `thinking_blocks`
 field, including cached streams. Thinking never appears in `token` event text.
 Treat these blocks as opaque tool-loop state; do not display them to users.
 
+Batch jobs on the direct Anthropic path keep thinking blocks on replay: the gateway
+moves them into the assistant message's `content` before the batch is submitted.
+Batch tool loops (tool calls, tool results and tool definitions) are not converted
+to Anthropic's format yet, so they are not supported.
+
 **Tool definition fields**
 
 | Field | Type | Description |

@@ -74,11 +74,13 @@ Request 2  → GET key → miss
            → calls provider without waiting; does not populate cache
 
 Request 1  → gets LLM response
-           → SET key <response> EX <ttl>
+           → SET key <response> EX <ttl>, only if lock:key still holds token-A
            → atomic compare-and-delete of lock:key if still owned by token-A
 ```
 
 The owner releases its lock in `finally` after success, failure or stream cancellation. Cancellation while waiting for acquisition also attempts protected cleanup using the token that may already be stored. An atomic Lua comparison prevents an expired owner from deleting a newer owner's lock. Streaming acquires the lock only when the response body starts being consumed. If cleanup cannot reach Redis, the expiry remains the fallback.
+
+The population write is one atomic Lua script: it stores the answer only while `lock:<key>` still holds the owner's token. An owner whose lock expired and was taken by another request cannot overwrite that request's answer or restart its expiry; its write is refused and logged. A provider call slower than the 10-second lock is therefore not cached.
 
 ---
 

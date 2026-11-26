@@ -324,7 +324,7 @@ async def chat(
             provider_reported_usage=(response.provider_raw or {}).get("usage") or response.usage.model_dump(),
         )
         if cache_token is not None and can_cache_response(response):
-            await cache.set(cache_key, response, ttl_seconds=settings.cache_ttl_seconds)
+            await cache.set(cache_key, response, ttl_seconds=settings.cache_ttl_seconds, token=cache_token)
         print(f"[chat] response: {response.model_dump_json(indent=2)}")
         return response
     finally:
@@ -522,7 +522,7 @@ async def chat_stream(
                 policy=PolicyBlock(),
             )
             if cache_token is not None and can_cache_response(cached_response):
-                await cache.set(cache_key, cached_response, ttl_seconds=settings.cache_ttl_seconds)
+                await cache.set(cache_key, cached_response, ttl_seconds=settings.cache_ttl_seconds, token=cache_token)
             await _write_ledger_entry(
                 db, request_id=request_id, tenant_id=tenant.id, call_metadata=call_metadata,
                 provider=normalised.provider, model=normalised.model,
